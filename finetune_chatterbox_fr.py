@@ -124,6 +124,11 @@ class TrainingConfig:
     cloning_mode: str = "cross_lingual"    # "cross_lingual" or "monolingual"
     num_speakers: int = 8
 
+    # ---- HuggingFace upload ----
+    hf_token: str = ""
+    hf_username: str = "amanuelbyte"
+    hf_repo_name: str = "chatterbox-fr-lora"
+
     def __post_init__(self):
         for d in [
             self.output_dir,
@@ -1033,9 +1038,115 @@ class ChatterboxFrTrainer:
         torch.save(self.model.t3.state_dict(),
                     os.path.join(merged_dir, "t3_mtl23ls_v2.pt"))
         logger.info(f"Merged model → {merged_dir}")
-        logger.info("Run `python fix_merged_model.py` to convert to safetensors")
         logger.info(f"Best val loss: {self.best_val_loss:.4f}")
+
+        # Upload to HuggingFace
+        if self.cfg.hf_token:
+            self.upload_to_hf()
+
         logger.info("All done ✓")
+
+    # ---- HuggingFace Upload ----
+
+    def upload_to_hf(self):
+        """Upload LoRA adapter, merged model, samples, config to HuggingFace."""
+        from huggingface_hub import HfApi, create_repo
+
+        repo_id = f"{self.cfg.hf_username}/{self.cfg.hf_repo_name}"
+        logger.info(f"Uploading to HuggingFace: {repo_id}")
+
+        api = HfApi(token=self.cfg.hf_token)
+
+        # Create repo (if not exists)
+        try:
+            create_repo(repo_id, token=self.cfg.hf_token, exist_ok=True,
+                        repo_type="model", private=False)
+        except Exception as e:
+            logger.warning(f"Repo creation: {e}")
+
+        # Upload key files
+        upload_files = []
+        ckpt_dir = os.path.join(self.cfg.output_dir, "checkpoints")
+        merged_dir = os.path.join(self.cfg.output_dir, "merged_model")
+
+        # LoRA adapters
+        for fname in ["final_lora_adapter.pt", "best_lora_adapter.pt"]:
+            fpath = os.path.join(ckpt_dir, fname)
+            if os.path.exists(fpath):
+                upload_files.append((fpath, fname))
+
+        # Merged model
+        merged_path = os.path.join(merged_dir, "t3_mtl23ls_v2.pt")
+        if os.path.exists(merged_path):
+            upload_files.append((merged_path, "merged_model/t3_mtl23ls_v2.pt"))
+
+        # Training config
+        cfg_path = os.path.join(self.cfg.output_dir, "training_config.json")
+        if os.path.exists(cfg_path):
+            upload_files.append((cfg_path, "training_config.json"))
+
+        # Metrics plot
+        plot_path = os.path.join(self.cfg.output_dir, "training_metrics.png")
+        if os.path.exists(plot_path):
+            upload_files.append((plot_path, "training_metrics.png"))
+
+        # Sample audio files (latest step)
+        samples_dir = os.path.join(self.cfg.output_dir, "samples")
+        if os.path.isdir(samples_dir):
+            step_dirs = sorted(os.listdir(samples_dir))
+            if step_dirs:
+                latest = os.path.join(samples_dir, step_dirs[-1])
+                for wav_file in os.listdir(latest):
+                    if wav_file.endswith(".wav"):
+                        upload_files.append((
+                            os.path.join(latest, wav_file),
+                            f"samples/{wav_file}",
+                        ))
+
+        for local_path, remote_name in upload_files:
+            try:
+                api.upload_file(
+                    path_or_fileobj=local_path,
+                    path_in_repo=remote_name,
+                    repo_id=repo_id,
+                    repo_type="model",
+                )
+                logger.info(f"  Uploaded: {remote_name}")
+            except Exception as e:
+                logger.warning(f"  Failed to upload {remote_name}: {e}")
+
+        # Create README
+        readme = f"""# Chatterbox FR LoRA Fine-Tuned Model
+
+Fine-tuned [Chatterbox Multilingual TTS](https://github.com/resemble-ai/chatterbox) for French voice cloning.
+
+## Training Details
+- **Base model**: ChatterboxMultilingualTTS
+- **Method**: LoRA (rank={self.cfg.lora_rank}, alpha={self.cfg.lora_alpha})
+- **Dataset**: {self.cfg.dataset_name} (20% stratified sample)
+- **Epochs**: {self.cfg.num_epochs}
+- **Best val loss**: {self.best_val_loss:.4f}
+- **Language**: French (fr)
+- **Cloning mode**: {self.cfg.cloning_mode}
+
+## Files
+- `final_lora_adapter.pt` - LoRA weights from last step
+- `best_lora_adapter.pt` - LoRA weights from best validation loss
+- `merged_model/t3_mtl23ls_v2.pt` - Full merged T3 model weights
+- `samples/` - Generated audio samples for comparison
+"""
+        try:
+            api.upload_file(
+                path_or_fileobj=readme.encode(),
+                path_in_repo="README.md",
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            logger.info(f"  Uploaded: README.md")
+        except Exception as e:
+            logger.warning(f"  Failed to upload README: {e}")
+
+        logger.info(f"✅ Model uploaded to https://huggingface.co/{repo_id}")
 
 
 # ============================================================================
@@ -1134,6 +1245,8 @@ def parse_args():
     p.add_argument("--cloning-mode", choices=["cross_lingual", "monolingual"],
                    default="cross_lingual")
     p.add_argument("--resume", type=str, default=None)
+    p.add_argument("--hf-token", type=str, default=None,
+                   help="HuggingFace token for uploading model after training")
     # Inference
     p.add_argument("--text", type=str, default=None)
     p.add_argument("--ref-audio", type=str, default=None)
@@ -1154,6 +1267,7 @@ def main():
         config.gradient_accumulation_steps = args.gradient_accumulation_steps
     config.use_lora = args.use_lora
     config.fp16 = args.fp16
+    if args.hf_token is not None: config.hf_token = args.hf_token
 
     if args.mode == "prepare-only":
         prepare_dataset(config)
