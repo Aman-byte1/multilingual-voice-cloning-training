@@ -224,11 +224,24 @@ def merge_lora(layers: List[LoRALayer]):
 # DATA PREPARATION  — HuggingFace → WAV files + metadata.csv
 # ============================================================================
 
+def _write_wav(args):
+    """Thread worker: save a single WAV file."""
+    path, wav_np, sr = args
+    wav_t = torch.from_numpy(wav_np)
+    if wav_t.dim() == 1:
+        wav_t = wav_t.unsqueeze(0)
+    torchaudio.save(path, wav_t, sr)
+
+
 def prepare_dataset(config: TrainingConfig) -> List[Dict]:
     """
     Download HF dataset, stratified-sample per speaker, extract French
     target audio as WAV files, create metadata.csv.
+
+    Optimised: batch-reads from HF dataset + ThreadPool WAV writing.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     logger.info(f"Loading dataset: {config.dataset_name}")
     ds = load_dataset(config.dataset_name, split=config.dataset_split,
                       cache_dir=config.cache_dir)
@@ -246,77 +259,112 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
         n = max(1, int(len(indices) * config.sample_fraction))
         chosen = rng.choice(indices, size=n, replace=False).tolist()
         sampled_indices.extend(chosen)
-        logger.info(f"  {speaker}: {len(indices)} total → {n} sampled")
+        logger.info(f"  {speaker}: {len(indices)} total -> {n} sampled")
 
     sampled_indices.sort()
     ds_sampled = ds.select(sampled_indices)
     logger.info(f"Sampled dataset: {len(ds_sampled)} rows")
 
-    # ── Extract audio + build metadata ──
+    # ── Extract audio + build metadata (batch mode) ──
     audio_dir = os.path.join(config.audio_data_dir, "audio")
     ref_dir = os.path.join(config.audio_data_dir, "ref_audio")
     os.makedirs(audio_dir, exist_ok=True)
     os.makedirs(ref_dir, exist_ok=True)
 
+    BATCH_SIZE = 100  # rows per HF batch read
     rows = []
     skipped = 0
+    total = len(ds_sampled)
 
-    for i in tqdm(range(len(ds_sampled)), desc="Extracting audio"):
-        sample = ds_sampled[i]
-        text = (sample.get("trg_fr_text") or "").strip()
-        if not text or len(text) < 2 or len(text) > 1000:
-            skipped += 1; continue
+    resampler_cache: Dict[int, T.Resample] = {}
 
-        # ── Target French audio ──
-        trg = sample.get("trg_fr_voice")
-        if trg is None or not isinstance(trg, dict):
-            skipped += 1; continue
-        wav = torch.from_numpy(np.asarray(trg["array"], dtype=np.float32))
-        sr = trg["sampling_rate"]
-        if wav.dim() == 1:
-            wav = wav.unsqueeze(0)
-        dur = wav.shape[-1] / sr
-        if dur < config.min_audio_duration_sec or dur > config.max_audio_duration_sec:
-            skipped += 1; continue
-        if sr != config.sample_rate:
-            wav = T.Resample(sr, config.sample_rate)(wav)
+    def get_resampler(src_sr: int) -> T.Resample:
+        if src_sr not in resampler_cache:
+            resampler_cache[src_sr] = T.Resample(src_sr, config.sample_rate)
+        return resampler_cache[src_sr]
 
-        trg_file = f"{sample['speaker_id']}_{i:06d}.wav"
-        torchaudio.save(os.path.join(audio_dir, trg_file), wav, config.sample_rate)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for batch_start in tqdm(range(0, total, BATCH_SIZE),
+                                desc="Extracting audio (batched)",
+                                total=(total + BATCH_SIZE - 1) // BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            # Batch-read from HF dataset (much faster than one-by-one)
+            batch = ds_sampled[batch_start:batch_end]
 
-        # ── Reference audio (for voice conditioning) ──
-        # cross-lingual: prefer EN reference; monolingual: prefer FR
-        if config.cloning_mode == "cross_lingual":
-            ref_data = sample.get("ref_en_voice") or sample.get("ref_fr_voice")
-        else:
-            ref_data = sample.get("ref_fr_voice") or sample.get("ref_en_voice")
+            write_futures = []
 
-        ref_file = ""
-        if ref_data is not None and isinstance(ref_data, dict):
-            ref_wav = torch.from_numpy(np.asarray(ref_data["array"], dtype=np.float32))
-            ref_sr = ref_data["sampling_rate"]
-            if ref_wav.dim() == 1:
-                ref_wav = ref_wav.unsqueeze(0)
-            if ref_sr != config.sample_rate:
-                ref_wav = T.Resample(ref_sr, config.sample_rate)(ref_wav)
-            # Trim reference
-            max_ref = int(config.ref_audio_max_duration_sec * config.sample_rate)
-            ref_wav = ref_wav[..., :max_ref]
-            ref_file = f"ref_{sample['speaker_id']}_{i:06d}.wav"
-            torchaudio.save(os.path.join(ref_dir, ref_file), ref_wav, config.sample_rate)
+            for j in range(batch_end - batch_start):
+                i = batch_start + j  # global index inside ds_sampled
 
-        rows.append({
-            "file_name": f"audio/{trg_file}",
-            "ref_file": f"ref_audio/{ref_file}" if ref_file else "",
-            "transcription": text,
-            "duration_seconds": round(wav.shape[-1] / config.sample_rate, 3),
-            "speaker_id": sample["speaker_id"],
-            "speaker_name": sample.get("speaker_name", ""),
-            "language_id": config.language_id,
-        })
+                text = (batch["trg_fr_text"][j] or "").strip()
+                if not text or len(text) < 2 or len(text) > 1000:
+                    skipped += 1; continue
 
-        if (i + 1) % 2000 == 0:
-            gc.collect()
+                speaker_id = batch["speaker_id"][j]
+                speaker_name = batch.get("speaker_name", [""])[j] if "speaker_name" in batch else ""
+
+                # ── Target French audio ──
+                trg = batch["trg_fr_voice"][j]
+                if trg is None or not isinstance(trg, dict):
+                    skipped += 1; continue
+                trg_array = np.asarray(trg["array"], dtype=np.float32)
+                sr = trg["sampling_rate"]
+                dur = len(trg_array) / sr
+                if dur < config.min_audio_duration_sec or dur > config.max_audio_duration_sec:
+                    skipped += 1; continue
+
+                # Resample if needed (do in numpy/torch, then back to numpy for thread)
+                if sr != config.sample_rate:
+                    wav_t = torch.from_numpy(trg_array).unsqueeze(0)
+                    wav_t = get_resampler(sr)(wav_t)
+                    trg_array = wav_t.squeeze(0).numpy()
+
+                trg_file = f"{speaker_id}_{i:06d}.wav"
+                trg_path = os.path.join(audio_dir, trg_file)
+                write_futures.append(
+                    pool.submit(_write_wav, (trg_path, trg_array, config.sample_rate))
+                )
+
+                # ── Reference audio ──
+                ref_file = ""
+                ref_key = "ref_en_voice" if config.cloning_mode == "cross_lingual" else "ref_fr_voice"
+                alt_key = "ref_fr_voice" if config.cloning_mode == "cross_lingual" else "ref_en_voice"
+                ref_data = batch.get(ref_key, [None])[j] if ref_key in batch else None
+                if ref_data is None or not isinstance(ref_data, dict):
+                    ref_data = batch.get(alt_key, [None])[j] if alt_key in batch else None
+
+                if ref_data is not None and isinstance(ref_data, dict):
+                    ref_array = np.asarray(ref_data["array"], dtype=np.float32)
+                    ref_sr = ref_data["sampling_rate"]
+                    if ref_sr != config.sample_rate:
+                        ref_t = torch.from_numpy(ref_array).unsqueeze(0)
+                        ref_t = get_resampler(ref_sr)(ref_t)
+                        ref_array = ref_t.squeeze(0).numpy()
+                    max_ref_samples = int(config.ref_audio_max_duration_sec * config.sample_rate)
+                    ref_array = ref_array[:max_ref_samples]
+                    ref_file = f"ref_{speaker_id}_{i:06d}.wav"
+                    ref_path = os.path.join(ref_dir, ref_file)
+                    write_futures.append(
+                        pool.submit(_write_wav, (ref_path, ref_array, config.sample_rate))
+                    )
+
+                rows.append({
+                    "file_name": f"audio/{trg_file}",
+                    "ref_file": f"ref_audio/{ref_file}" if ref_file else "",
+                    "transcription": text,
+                    "duration_seconds": round(len(trg_array) / config.sample_rate, 3),
+                    "speaker_id": speaker_id,
+                    "speaker_name": speaker_name,
+                    "language_id": config.language_id,
+                })
+
+            # Wait for this batch's writes to complete before next batch
+            for f in write_futures:
+                f.result()
+
+            # Periodic memory cleanup
+            if batch_start % 2000 == 0:
+                gc.collect()
 
     # ── Write metadata.csv ──
     csv_path = os.path.join(config.audio_data_dir, "metadata.csv")
@@ -325,7 +373,7 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
         w.writeheader()
         w.writerows(rows)
 
-    logger.info(f"Prepared {len(rows)} samples ({skipped} skipped) → {csv_path}")
+    logger.info(f"Prepared {len(rows)} samples ({skipped} skipped) -> {csv_path}")
     del ds, ds_sampled; gc.collect()
     return rows
 
