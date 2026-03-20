@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import GradScaler, autocast
+# amp imports handled via torch.amp directly
 import torchaudio
 import torchaudio.transforms as T
 import numpy as np
@@ -729,7 +729,7 @@ class ChatterboxFrTrainer:
                 continue
             for sample in batch:
                 try:
-                    with autocast(enabled=self.cfg.fp16, device_type="cuda"):
+                    with torch.amp.autocast("cuda", enabled=self.cfg.fp16):
                         loss = self.compute_loss(sample)
                     if loss is not None:
                         losses.append(loss.item())
@@ -867,7 +867,7 @@ class ChatterboxFrTrainer:
 
                 for sample in batch:
                     try:
-                        with autocast(enabled=self.cfg.fp16, device_type="cuda"):
+                        with torch.amp.autocast("cuda", enabled=self.cfg.fp16):
                             loss = self.compute_loss(sample)
 
                         if loss is not None:
