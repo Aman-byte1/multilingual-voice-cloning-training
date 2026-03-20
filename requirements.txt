@@ -18,8 +18,9 @@ safetensors>=0.4.0
 # Visualization
 matplotlib>=3.7.0
 
-# Audio I/O
+# Audio I/O & decoding
 soundfile>=0.12.0
+torchcodec                      # Required by HF datasets for audio decoding
 
 # Utilities
 numpy>=1.24.0
