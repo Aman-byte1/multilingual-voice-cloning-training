@@ -666,51 +666,86 @@ class ChatterboxFrTrainer:
     def compute_loss(self, sample: Dict) -> Optional[torch.Tensor]:
         """
         Forward pass through the real Chatterbox pipeline:
-          1. VE: extract speaker conditioning from reference (or target) audio
-          2. S3gen: extract ground-truth semantic tokens from target audio
-          3. T3: predict semantic tokens from text + conditioning
-          4. Cross-entropy loss on the semantic token predictions
+          1. VE:  speaker embedding from reference audio  (16 kHz numpy)
+          2. S3 tokenizer: extract ground-truth speech tokens (16 kHz numpy)
+          3. T3:  teacher-forced forward  → speech_logits
+          4. Cross-entropy loss on next-token prediction
         """
-        wav = sample["waveform"].unsqueeze(0).to(self.device)       # [1, T_audio]
+        import librosa as _librosa
+        from chatterbox.models.t3.t3 import T3Cond
+
         text = sample["text"]
         lang = sample.get("language_id", self.cfg.language_id)
 
-        # Use reference audio for speaker conditioning if available,
-        # otherwise fall back to target audio (single-speaker scenario)
-        ref = sample.get("ref_waveform")
-        if ref is not None:
-            ref = ref.unsqueeze(0).to(self.device)
+        # ── Convert waveforms to 16 kHz numpy (VE & S3 tokenizer operate at 16 kHz) ──
+        wav_np = sample["waveform"].numpy()
+        if wav_np.ndim > 1:
+            wav_np = wav_np.squeeze()
+        wav_16k = _librosa.resample(wav_np, orig_sr=self.cfg.sample_rate, target_sr=16000)
+
+        ref_wav = sample.get("ref_waveform")
+        if ref_wav is not None:
+            ref_np = ref_wav.numpy()
+            if ref_np.ndim > 1:
+                ref_np = ref_np.squeeze()
+            ref_16k = _librosa.resample(ref_np, orig_sr=self.cfg.sample_rate, target_sr=16000)
         else:
-            ref = wav
+            ref_16k = wav_16k
 
         with torch.no_grad():
-            # Speaker conditioning vector
-            conds = self.model.ve(ref)
-            # Ground-truth semantic tokens from target audio
-            s3_tokens = self.model.s3gen.extract_s3_tokens(wav)
+            # 1. Speaker embedding via voice encoder
+            ve_embed = torch.from_numpy(
+                self.model.ve.embeds_from_wavs([ref_16k], sample_rate=16000)
+            ).mean(axis=0, keepdim=True).to(self.device)
 
-        # Tokenize text
-        text_tokens = self.model.t3.tokenize_text(text, lang_id=lang)
-        if isinstance(text_tokens, torch.Tensor):
-            text_tokens = text_tokens.to(self.device)
-        else:
-            text_tokens = torch.tensor(text_tokens, dtype=torch.long, device=self.device)
+            # 2. Ground-truth speech tokens from target audio
+            s3_tokzr = self.model.s3gen.tokenizer
+            speech_tokens, _ = s3_tokzr.forward([wav_16k])
+            speech_tokens = torch.atleast_2d(speech_tokens).to(self.device)
+
+            # 3. Conditioning prompt tokens from reference audio
+            plen = self.model.t3.hp.speech_cond_prompt_len
+            enc_cond_len = getattr(self.model, "ENC_COND_LEN", len(ref_16k))
+            cond_tokens, _ = s3_tokzr.forward(
+                [ref_16k[:enc_cond_len]], max_len=plen
+            )
+            cond_tokens = torch.atleast_2d(cond_tokens).to(self.device)
+
+        # 4. Build T3Cond
+        t3_cond = T3Cond(
+            speaker_emb=ve_embed,
+            cond_prompt_speech_tokens=cond_tokens,
+            emotion_adv=0.5 * torch.ones(1, 1, 1),
+        ).to(device=self.device)
+
+        # 5. Tokenize text
+        text_tokens = self.model.tokenizer.text_to_tokens(
+            text, language_id=lang
+        ).to(self.device)
+        sot = self.model.t3.hp.start_text_token
+        eot = self.model.t3.hp.stop_text_token
+        text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+        text_tokens = F.pad(text_tokens, (0, 1), value=eot)
         if text_tokens.dim() == 1:
             text_tokens = text_tokens.unsqueeze(0)
 
-        # T3 forward (teacher-forced)
-        logits = self.model.t3.forward_train(
-            text_tokens=text_tokens,
-            s3_tokens=s3_tokens,
-            conds=conds,
-            language_id=lang,
-        )
-        if isinstance(logits, tuple):
-            logits = logits[0]
+        # 6. T3 forward (teacher-forced)
+        text_token_lens = torch.tensor([text_tokens.size(1)], device=self.device)
+        speech_token_lens = torch.tensor([speech_tokens.size(1)], device=self.device)
 
-        # Next-token prediction loss
-        target = s3_tokens[:, 1:].contiguous()
-        logits = logits[:, :target.shape[1], :].contiguous()
+        out = self.model.t3.forward(
+            t3_cond=t3_cond,
+            text_tokens=text_tokens,
+            text_token_lens=text_token_lens,
+            speech_tokens=speech_tokens,
+            speech_token_lens=speech_token_lens,
+            training=True,
+        )
+
+        # 7. Next-token prediction loss on speech logits
+        speech_logits = out.speech_logits          # (B, len_speech, vocab)
+        target = speech_tokens[:, 1:].contiguous()
+        logits = speech_logits[:, :-1, :].contiguous()
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)),
             target.view(-1),
