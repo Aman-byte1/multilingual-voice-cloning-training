@@ -72,7 +72,7 @@ class TrainingConfig:
     """All hyperparameters and paths for fine-tuning."""
 
     # ---- Dataset ----
-    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-expanded2"
+    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-expandedtry"
     dataset_split: str = "train"
     sample_fraction: float = 0.20          # Use 20% of training set
     cache_dir: str = "./data_cache"
@@ -802,12 +802,21 @@ class ChatterboxFrTrainer:
         ]
 
         # Pick random references from val set for variety
+        # Use English reference voice (ref_file) for cross-lingual cloning
         import shutil
         try:
             for i, txt in enumerate(texts[:self.cfg.num_test_samples]):
                 ref_sample = random.choice(self.val_meta)
-                ref_path = os.path.join(self.cfg.audio_data_dir, ref_sample["file_name"])
                 spk_name = ref_sample.get("speaker_name", ref_sample.get("speaker_id", "?"))
+
+                # Prefer English reference voice for cross-lingual evaluation
+                ref_file = ref_sample.get("ref_file", "")
+                if ref_file:
+                    ref_path = os.path.join(self.cfg.audio_data_dir, ref_file)
+                else:
+                    ref_path = os.path.join(self.cfg.audio_data_dir, ref_sample["file_name"])
+                if not os.path.exists(ref_path):
+                    ref_path = os.path.join(self.cfg.audio_data_dir, ref_sample["file_name"])
 
                 wav = self.model.generate(
                     txt, audio_prompt_path=ref_path,
@@ -816,15 +825,15 @@ class ChatterboxFrTrainer:
                 if isinstance(wav, torch.Tensor):
                     if wav.dim() == 1:
                         wav = wav.unsqueeze(0)
-                    # Save generated sample
+                    # Save generated FR sample
                     torchaudio.save(
                         os.path.join(out_dir, f"sample_{i}.wav"),
                         wav.cpu(), self.model.sr,
                     )
-                    # Also save reference voice for A/B comparison
-                    ref_dest = os.path.join(out_dir, f"ref_{i}_{spk_name}.wav")
+                    # Save EN reference voice for A/B comparison
+                    ref_dest = os.path.join(out_dir, f"ref_{i}_{spk_name}_EN.wav")
                     shutil.copy2(ref_path, ref_dest)
-                    logger.info(f"  Generated sample_{i}.wav (Voice: {spk_name}) + ref saved")
+                    logger.info(f"  Generated sample_{i}.wav (FR) from ref: {spk_name} (EN) + ref saved")
         except Exception as e:
             logger.warning(f"Sample generation failed: {e}")
 
