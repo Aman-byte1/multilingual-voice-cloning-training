@@ -86,7 +86,7 @@ class TrainingConfig:
 
     # ---- Training ----
     output_dir: str = "./chatterbox_fr_finetuned"
-    num_epochs: int = 10
+    num_epochs: int = 3
     batch_size: int = 2                    # Per-GPU batch size
     gradient_accumulation_steps: int = 4
     learning_rate: float = 2e-5
