@@ -149,8 +149,9 @@ class LoRALayer(nn.Module):
         self.scaling = alpha / rank
 
         in_f, out_f = original.in_features, original.out_features
-        self.lora_A = nn.Parameter(torch.zeros(rank, in_f))
-        self.lora_B = nn.Parameter(torch.zeros(out_f, rank))
+        dev, dt = original.weight.device, original.weight.dtype
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_f, device=dev, dtype=dt))
+        self.lora_B = nn.Parameter(torch.zeros(out_f, rank, device=dev, dtype=dt))
         self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
