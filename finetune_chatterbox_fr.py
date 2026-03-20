@@ -565,7 +565,7 @@ class ChatterboxFrTrainer:
         self.model = None
         self.lora_layers: List[LoRALayer] = []
         self.optimizer = None
-        self.scaler = GradScaler(enabled=config.fp16)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=config.fp16)
         self.metrics = Metrics()
         self.global_step = 0
         self.best_val_loss = float("inf")
@@ -574,7 +574,7 @@ class ChatterboxFrTrainer:
 
         if torch.cuda.is_available():
             logger.info(f"GPU: {torch.cuda.get_device_name()} "
-                        f"({torch.cuda.get_device_properties(0).total_mem/1e9:.1f} GB)")
+                        f"({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
 
     @staticmethod
     def _set_seed(seed):
