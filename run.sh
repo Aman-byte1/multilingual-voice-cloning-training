@@ -79,8 +79,8 @@ if [ "$TEST_ONLY" = false ]; then
         --output-dir "$OUTPUT_DIR" \
         --use-lora \
         --lora-rank 32 \
-        --batch-size 2 \
-        --epochs 10 \
+        --batch-size 4 \
+        --epochs 3 \
         --lr 2e-5 \
         --gradient-accumulation-steps 4 \
         --fp16 \

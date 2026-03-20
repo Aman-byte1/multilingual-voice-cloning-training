@@ -80,6 +80,7 @@ class TrainingConfig:
 
     # ---- Audio ----
     sample_rate: int = 24000               # Chatterbox native SR
+    target_sr: int = 16000                 # VE & S3 tokenizer operate at 16 kHz
     max_audio_duration_sec: float = 20.0
     min_audio_duration_sec: float = 0.5
     ref_audio_max_duration_sec: float = 10.0
@@ -87,7 +88,7 @@ class TrainingConfig:
     # ---- Training ----
     output_dir: str = "./chatterbox_fr_finetuned"
     num_epochs: int = 3
-    batch_size: int = 2                    # Per-GPU batch size
+    batch_size: int = 4                    # Per-GPU batch size
     gradient_accumulation_steps: int = 4
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
@@ -387,41 +388,54 @@ class ChatterboxFrDataset(Dataset):
     """PyTorch Dataset for Chatterbox fine-tuning."""
 
     def __init__(self, metadata: List[Dict], base_dir: str,
-                 sr: int = 24000, max_dur: float = 20.0):
+                 sr: int = 24000, target_sr: int = 16000,
+                 max_dur: float = 20.0):
         self.meta = metadata
         self.base = base_dir
         self.sr = sr
+        self.target_sr = target_sr
         self.max_dur = max_dur
+        # Cache resamplers
+        self._resamp_to_native = None
+        self._resamp_to_16k = T.Resample(sr, target_sr) if sr != target_sr else None
 
     def __len__(self):
         return len(self.meta)
 
+    def _load_and_resample(self, path):
+        """Load audio, convert to mono, resample to 16 kHz numpy."""
+        wav, sr = torchaudio.load(path)
+        if sr != self.sr:
+            wav = T.Resample(sr, self.sr)(wav)
+        if wav.shape[0] > 1:
+            wav = wav.mean(0, keepdim=True)
+        # Resample to 16 kHz for VE & S3 tokenizer (done in worker thread)
+        if self._resamp_to_16k is not None:
+            wav_16k = self._resamp_to_16k(wav)
+        else:
+            wav_16k = wav
+        return wav_16k.squeeze(0).numpy()
+
     def __getitem__(self, idx):
         row = self.meta[idx]
         try:
-            wav, sr = torchaudio.load(os.path.join(self.base, row["file_name"]))
-            if sr != self.sr:
-                wav = T.Resample(sr, self.sr)(wav)
-            if wav.shape[0] > 1:
-                wav = wav.mean(0, keepdim=True)
+            wav_16k = self._load_and_resample(
+                os.path.join(self.base, row["file_name"])
+            )
 
             # Load reference audio if available
-            ref_wav = None
+            ref_16k = None
             if row.get("ref_file"):
                 ref_path = os.path.join(self.base, row["ref_file"])
                 if os.path.exists(ref_path):
-                    ref_wav, ref_sr = torchaudio.load(ref_path)
-                    if ref_sr != self.sr:
-                        ref_wav = T.Resample(ref_sr, self.sr)(ref_wav)
-                    if ref_wav.shape[0] > 1:
-                        ref_wav = ref_wav.mean(0, keepdim=True)
-                    ref_wav = ref_wav.squeeze(0)
+                    ref_16k = self._load_and_resample(ref_path)
 
             return {
-                "waveform": wav.squeeze(0),
-                "ref_waveform": ref_wav,
+                "wav_16k": wav_16k,          # numpy float32, 16 kHz
+                "ref_16k": ref_16k,           # numpy float32, 16 kHz (or None)
                 "text": row["transcription"],
                 "speaker_id": row.get("speaker_id", ""),
+                "speaker_name": row.get("speaker_name", ""),
                 "language_id": row.get("language_id", "fr"),
                 "duration": float(row.get("duration_seconds", 0)),
             }
@@ -633,15 +647,17 @@ class ChatterboxFrTrainer:
             meta, self.cfg.val_split_ratio, self.cfg.seed
         )
         self.train_loader = DataLoader(
-            ChatterboxFrDataset(self.train_meta, self.cfg.audio_data_dir, self.cfg.sample_rate),
+            ChatterboxFrDataset(self.train_meta, self.cfg.audio_data_dir,
+                                self.cfg.sample_rate, self.cfg.target_sr),
             batch_size=self.cfg.batch_size, shuffle=True,
-            num_workers=2, collate_fn=collate_fn,
-            pin_memory=True, drop_last=True,
+            num_workers=4, collate_fn=collate_fn,
+            pin_memory=True, drop_last=True, prefetch_factor=3,
         )
         self.val_loader = DataLoader(
-            ChatterboxFrDataset(self.val_meta, self.cfg.audio_data_dir, self.cfg.sample_rate),
+            ChatterboxFrDataset(self.val_meta, self.cfg.audio_data_dir,
+                                self.cfg.sample_rate, self.cfg.target_sr),
             batch_size=1, shuffle=False,
-            num_workers=1, collate_fn=collate_fn,
+            num_workers=2, collate_fn=collate_fn,
         )
 
     # ---- Optimizer ----
@@ -671,26 +687,18 @@ class ChatterboxFrTrainer:
           2. S3 tokenizer: extract ground-truth speech tokens (16 kHz numpy)
           3. T3:  teacher-forced forward  → speech_logits
           4. Cross-entropy loss on next-token prediction
+
+        Audio is already pre-resampled to 16 kHz by the DataLoader workers.
         """
-        import librosa as _librosa
         from chatterbox.models.t3.t3 import T3Cond
 
         text = sample["text"]
         lang = sample.get("language_id", self.cfg.language_id)
 
-        # ── Convert waveforms to 16 kHz numpy (VE & S3 tokenizer operate at 16 kHz) ──
-        wav_np = sample["waveform"].numpy()
-        if wav_np.ndim > 1:
-            wav_np = wav_np.squeeze()
-        wav_16k = _librosa.resample(wav_np, orig_sr=self.cfg.sample_rate, target_sr=16000)
-
-        ref_wav = sample.get("ref_waveform")
-        if ref_wav is not None:
-            ref_np = ref_wav.numpy()
-            if ref_np.ndim > 1:
-                ref_np = ref_np.squeeze()
-            ref_16k = _librosa.resample(ref_np, orig_sr=self.cfg.sample_rate, target_sr=16000)
-        else:
+        # ── Audio already at 16 kHz numpy from DataLoader ──
+        wav_16k = sample["wav_16k"]
+        ref_16k = sample.get("ref_16k")
+        if ref_16k is None:
             ref_16k = wav_16k
 
         with torch.no_grad():
@@ -788,12 +796,14 @@ class ChatterboxFrTrainer:
             "La recherche en traitement automatique du langage naturel progresse rapidement.",
         ]
 
-        # Pick a reference from val set
+        # Pick random references from val set for variety
+        import shutil
         try:
-            ref_sample = self.val_meta[0]
-            ref_path = os.path.join(self.cfg.audio_data_dir, ref_sample["file_name"])
-
             for i, txt in enumerate(texts[:self.cfg.num_test_samples]):
+                ref_sample = random.choice(self.val_meta)
+                ref_path = os.path.join(self.cfg.audio_data_dir, ref_sample["file_name"])
+                spk_name = ref_sample.get("speaker_name", ref_sample.get("speaker_id", "?"))
+
                 wav = self.model.generate(
                     txt, audio_prompt_path=ref_path,
                     language_id=self.cfg.language_id,
@@ -801,11 +811,15 @@ class ChatterboxFrTrainer:
                 if isinstance(wav, torch.Tensor):
                     if wav.dim() == 1:
                         wav = wav.unsqueeze(0)
+                    # Save generated sample
                     torchaudio.save(
                         os.path.join(out_dir, f"sample_{i}.wav"),
                         wav.cpu(), self.model.sr,
                     )
-                    logger.info(f"  Generated sample_{i}.wav")
+                    # Also save reference voice for A/B comparison
+                    ref_dest = os.path.join(out_dir, f"ref_{i}_{spk_name}.wav")
+                    shutil.copy2(ref_path, ref_dest)
+                    logger.info(f"  Generated sample_{i}.wav (Voice: {spk_name}) + ref saved")
         except Exception as e:
             logger.warning(f"Sample generation failed: {e}")
 
