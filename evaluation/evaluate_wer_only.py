@@ -40,7 +40,7 @@ def main():
                         help="HF dataset cache directory")
     parser.add_argument("--batch-size", type=int, default=32, 
                         help="ASR batch size. Higher = faster GPU saturation (32-64 is great for A40)")
-    parser.add_argument("--model", default="openai/whisper-small", 
+    parser.add_argument("--model", default="openai/whisper-medium", 
                         help="ASR model to use for transcription")
     args = parser.parse_args()
 
