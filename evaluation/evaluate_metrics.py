@@ -10,10 +10,11 @@ Pipeline:
      - Speaker Similarity (ECAPA-TDNN cosine similarity)
      - Mel Cepstral Distortion (MCD)
      - Perceptual Evaluation of Speech Quality (PESQ)
+     - Word Error Rate (WER) using Whisper
   5. Outputs per-sample CSV + aggregate summary
 
 Prerequisites:
-    pip install pesq pymcd speechbrain librosa datasets huggingface_hub torchaudio
+    pip install pesq pymcd speechbrain librosa datasets huggingface_hub torchaudio jiwer transformers
 
 Usage:
     python evaluation/evaluate_metrics.py
@@ -145,6 +146,23 @@ def compute_speaker_similarity(verifier, ref_wav_path: str, synth_wav_path: str)
         return None
 
 
+def compute_wer_score(reference_text: str, synth_wav_path: str, asr_pipe) -> Optional[float]:
+    """Word Error Rate using Whisper."""
+    try:
+        import jiwer
+        transcription = asr_pipe(synth_wav_path, generate_kwargs={"language": "french"})["text"]
+        
+        # Clean up text (lowercase, remove punctuation)
+        ref_clean = jiwer.RemovePunctuation()(reference_text.lower())
+        hyp_clean = jiwer.RemovePunctuation()(transcription.lower())
+        
+        if not ref_clean:
+            return None
+        return float(jiwer.wer(ref_clean, hyp_clean))
+    except Exception as e:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Helpers — save numpy audio to a temp WAV
 # ---------------------------------------------------------------------------
@@ -236,10 +254,21 @@ def main():
         verifier = None
 
     # ------------------------------------------------------------------
-    # 4. Run inference + metrics on each test sample
+    # 4. Load Whisper ASR model for WER
+    # ------------------------------------------------------------------
+    print("🔧 Loading Whisper ASR model for WER ...")
+    try:
+        from transformers import pipeline
+        asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=device)
+    except Exception as e:
+        print(f"   ⚠ Could not load Whisper ASR: {e}")
+        asr_pipe = None
+
+    # ------------------------------------------------------------------
+    # 5. Run inference + metrics on each test sample
     # ------------------------------------------------------------------
     results = []
-    pesq_scores, mcd_scores, spk_scores = [], [], []
+    pesq_scores, mcd_scores, spk_scores, wer_scores = [], [], [], []
 
     print(f"\n🚀 Running evaluation on {total} test samples ...\n")
 
@@ -299,6 +328,7 @@ def main():
             p = compute_pesq_score(gt_wav_path, synth_wav_path)
             m = compute_mcd_score(gt_wav_path, synth_wav_path)
             s = compute_speaker_similarity(verifier, gt_wav_path, synth_wav_path) if verifier else None
+            w = compute_wer_score(text_fr, synth_wav_path, asr_pipe) if asr_pipe else None
 
             if p is not None:
                 pesq_scores.append(p)
@@ -306,6 +336,8 @@ def main():
                 mcd_scores.append(m)
             if s is not None:
                 spk_scores.append(s)
+            if w is not None:
+                wer_scores.append(w)
 
             results.append({
                 "index": i,
@@ -315,6 +347,7 @@ def main():
                 "PESQ": f"{p:.4f}" if p is not None else "N/A",
                 "MCD": f"{m:.4f}" if m is not None else "N/A",
                 "Speaker_Similarity": f"{s:.4f}" if s is not None else "N/A",
+                "WER": f"{w:.4f}" if w is not None else "N/A",
             })
 
         except RuntimeError as e:
@@ -377,6 +410,13 @@ def main():
                 "max": float(np.max(spk_scores)) if spk_scores else None,
                 "count": len(spk_scores),
             },
+            "WER": {
+                "mean": float(np.mean(wer_scores)) if wer_scores else None,
+                "std": float(np.std(wer_scores)) if wer_scores else None,
+                "min": float(np.min(wer_scores)) if wer_scores else None,
+                "max": float(np.max(wer_scores)) if wer_scores else None,
+                "count": len(wer_scores),
+            },
         },
     }
 
@@ -407,6 +447,11 @@ def main():
         print(f"  Speaker Similarity: {np.mean(spk_scores):.4f} ± {np.std(spk_scores):.4f}")
     else:
         print("  Speaker Similarity: N/A (install: pip install speechbrain)")
+
+    if wer_scores:
+        print(f"  WER:                {np.mean(wer_scores):.4f} ± {np.std(wer_scores):.4f}")
+    else:
+        print("  WER:                N/A (install: pip install jiwer transformers)")
 
     print("=" * 60)
     print(f"\n📄 Full results:  {csv_path}")
