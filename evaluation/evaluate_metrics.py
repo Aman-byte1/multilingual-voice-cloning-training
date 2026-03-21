@@ -1,174 +1,409 @@
 #!/usr/bin/env python3
 """
-Evaluation script to compute synthesized speech metrics.
+End-to-end evaluation of the Chatterbox FR LoRA fine-tuned model.
 
-Metrics computed:
-1. Perceptual Evaluation of Speech Quality (PESQ) [14]
-   - Measures distortions and changes in quality compared to reference audio.
-2. Mel Cepstral Distortion (MCD) [16]
-   - Measures distance between mel-cepstral coefficients of original and synthesized speech, quantifying tonality similarity.
-3. Speaker Similarity
-   - Cosine similarity of speaker embeddings to quantify voice match using SpeechBrain ECAPA-TDNN.
+Pipeline:
+  1. Downloads the TEST split from `amanuelbyte/acl-voice-cloning-fr-expandedtry`
+  2. Loads base ChatterboxMultilingualTTS + LoRA adapter from HuggingFace
+  3. Runs inference on each test sample (cross-lingual: EN ref → FR synthesis)
+  4. Computes three metrics comparing synthesized vs ground-truth FR audio:
+     - Speaker Similarity (ECAPA-TDNN cosine similarity)
+     - Mel Cepstral Distortion (MCD)
+     - Perceptual Evaluation of Speech Quality (PESQ)
+  5. Outputs per-sample CSV + aggregate summary
 
 Prerequisites:
-  pip install pesq pymcd speechbrain librosa
+    pip install pesq pymcd speechbrain librosa datasets huggingface_hub torchaudio
+
+Usage:
+    python evaluation/evaluate_metrics.py
+    python evaluation/evaluate_metrics.py --max-samples 100
+    python evaluation/evaluate_metrics.py --lora-file final_lora_adapter.pt
 """
 
 import os
+import sys
+import math
+import csv
+import json
 import argparse
 import warnings
+import tempfile
+from typing import List, Optional
 
 import numpy as np
 import librosa
 import torch
+import torch.nn as nn
+import torchaudio
 from tqdm import tqdm
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
-# Suppress warnings
 warnings.filterwarnings("ignore")
 
-# --- Metric Libraries ---
-try:
-    from pesq import pesq, NoUtterancesError
-except ImportError:
-    pesq = None
-    print("WARNING: 'pesq' library is not installed. To evaluate PESQ, run: pip install pesq")
+# ---------------------------------------------------------------------------
+# LoRA helpers (must match training code exactly)
+# ---------------------------------------------------------------------------
 
-try:
-    from pymcd.mcd import Calculate_MCD
-except ImportError:
-    Calculate_MCD = None
-    print("WARNING: 'pymcd' library is not installed. To evaluate MCD, run: pip install pymcd")
+class LoRALayer(nn.Module):
+    def __init__(self, original: nn.Linear, rank: int, alpha: float, dropout: float = 0.0):
+        super().__init__()
+        self.original_layer = original
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        in_f, out_f = original.in_features, original.out_features
+        dev, dt = original.weight.device, original.weight.dtype
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_f, device=dev, dtype=dt))
+        self.lora_B = nn.Parameter(torch.zeros(out_f, rank, device=dev, dtype=dt))
+        self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        for p in self.original_layer.parameters():
+            p.requires_grad = False
 
-try:
-    from speechbrain.inference.speaker import SpeakerRecognition
-except ImportError:
+    def forward(self, x):
+        base = self.original_layer(x)
+        lora = self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T * self.scaling
+        return base + lora
+
+
+def inject_lora(model, targets, rank, alpha, dropout=0.0):
+    layers = []
+    for name, module in list(model.named_modules()):
+        for target in targets:
+            if target in name and isinstance(module, nn.Linear):
+                parts = name.split(".")
+                parent = model
+                for p in parts[:-1]:
+                    parent = parent[int(p)] if p.isdigit() else getattr(parent, p)
+                lora = LoRALayer(module, rank, alpha, dropout)
+                setattr(parent, parts[-1], lora)
+                layers.append(lora)
+                break
+    return layers
+
+
+def load_lora_state(layers, path, device="cuda"):
+    state = torch.load(path, map_location=device, weights_only=True)
+    for i, layer in enumerate(layers):
+        if f"layer_{i}_A" in state:
+            layer.lora_A.data = state[f"layer_{i}_A"].to(device)
+            layer.lora_B.data = state[f"layer_{i}_B"].to(device)
+
+
+# ---------------------------------------------------------------------------
+# Metric helpers
+# ---------------------------------------------------------------------------
+
+def compute_pesq_score(ref_wav_path: str, synth_wav_path: str) -> Optional[float]:
+    """PESQ wideband (16 kHz)."""
     try:
-        # Fallback for older speechbrain versions
-        from speechbrain.pretrained import SpeakerRecognition
+        from pesq import pesq as pesq_fn, NoUtterancesError
+        ref, _ = librosa.load(ref_wav_path, sr=16000)
+        syn, _ = librosa.load(synth_wav_path, sr=16000)
+        min_len = min(len(ref), len(syn))
+        if min_len < 16000 * 0.5:
+            return None
+        return float(pesq_fn(16000, ref[:min_len], syn[:min_len], "wb"))
+    except Exception:
+        return None
+
+
+def compute_mcd_score(ref_wav_path: str, synth_wav_path: str) -> Optional[float]:
+    """Mel Cepstral Distortion."""
+    try:
+        from pymcd.mcd import Calculate_MCD
+        mcd_calc = Calculate_MCD(MCD_mode="plain")
+        return float(mcd_calc.calculate_mcd(ref_wav_path, synth_wav_path))
+    except Exception:
+        return None
+
+
+def load_speaker_model():
+    """Load ECAPA-TDNN speaker verification model."""
+    try:
+        from speechbrain.inference.speaker import SpeakerRecognition
     except ImportError:
-        SpeakerRecognition = None
-        print("WARNING: 'speechbrain' is not installed. To evaluate Speaker Similarity, run: pip install speechbrain")
+        from speechbrain.pretrained import SpeakerRecognition
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return SpeakerRecognition.from_hparams(
+        source="speechbrain/spkrec-ecapa-voxceleb",
+        savedir="pretrained_models/spkrec-ecapa-voxceleb",
+        run_opts={"device": device},
+    )
 
 
-class VoiceEvaluator:
-    def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # MCD Toolbox
-        self.mcd_toolbox = None
-        if Calculate_MCD is not None:
-            self.mcd_toolbox = Calculate_MCD(MCD_mode="plain")
-            
-        # Speaker Recognition Model
-        self.verification_model = None
-        if SpeakerRecognition is not None:
-            print("Loading SpeechBrain ECAPA-TDNN for Speaker Similarity computation...")
-            self.verification_model = SpeakerRecognition.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb", 
-                savedir="pretrained_models/spkrec-ecapa-voxceleb",
-                run_opts={"device": self.device}
-            )
+def compute_speaker_similarity(verifier, ref_wav_path: str, synth_wav_path: str) -> Optional[float]:
+    """Cosine similarity of ECAPA-TDNN embeddings."""
+    try:
+        score, _ = verifier.verify_files(ref_wav_path, synth_wav_path)
+        return float(score.item())
+    except Exception:
+        return None
 
-    def evaluate_pair(self, ref_audio_path: str, synth_audio_path: str) -> dict:
-        """Evaluates a single pair of reference and synthesized audio files."""
-        metrics = {
-            "PESQ": np.nan,
-            "MCD": np.nan,
-            "Speaker_Similarity": np.nan
-        }
 
-        # 1. PESQ (Perceptual Evaluation of Speech Quality)
-        if pesq is not None:
-            try:
-                # PESQ 'wb' requires identical 16kHz audio sampling rate
-                ref_wav, _ = librosa.load(ref_audio_path, sr=16000)
-                synth_wav, _ = librosa.load(synth_audio_path, sr=16000)
-                
-                # Trim to minimum length so arrays match. 
-                # PESQ compares aligned signals.
-                min_len = min(len(ref_wav), len(synth_wav))
-                ref_trim = ref_wav[:min_len]
-                synth_trim = synth_wav[:min_len]
+# ---------------------------------------------------------------------------
+# Helpers — save numpy audio to a temp WAV
+# ---------------------------------------------------------------------------
 
-                if min_len > 16000 * 0.5: # More than 0.5 seconds required
-                    score = pesq(16000, ref_trim, synth_trim, 'wb')
-                    metrics["PESQ"] = float(score)
-            except NoUtterancesError:
-                pass # Silent sections causing errors
-            except Exception as e:
-                print(f"PESQ computing error for {os.path.basename(synth_audio_path)}: {e}")
+def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval") -> str:
+    """Save a numpy array to a temporary WAV file and return the path."""
+    fd, path = tempfile.mkstemp(suffix=".wav", prefix=prefix)
+    os.close(fd)
+    wav_t = torch.from_numpy(audio_array).float()
+    if wav_t.dim() == 1:
+        wav_t = wav_t.unsqueeze(0)
+    torchaudio.save(path, wav_t, sr)
+    return path
 
-        # 2. MCD (Mel Cepstral Distortion)
-        if self.mcd_toolbox is not None:
-            try:
-                mcd_value = self.mcd_toolbox.calculate_mcd(ref_audio_path, synth_audio_path)
-                metrics["MCD"] = float(mcd_value)
-            except Exception as e:
-                print(f"MCD computing error for {os.path.basename(synth_audio_path)}: {e}")
 
-        # 3. Speaker Similarity (Cosine distance of ECAPA-TDNN embeddings)
-        if self.verification_model is not None:
-            try:
-                score, prediction = self.verification_model.verify_files(ref_audio_path, synth_audio_path)
-                metrics["Speaker_Similarity"] = float(score.item())
-            except Exception as e:
-                print(f"Speaker Similarity error for {os.path.basename(synth_audio_path)}: {e}")
-
-        return metrics
-
+# ---------------------------------------------------------------------------
+# Main evaluation pipeline
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Calculate metrics: MCD, PESQ, Speaker Similarity for VC.")
-    parser.add_argument("--ref", type=str, help="Path to reference original audio file")
-    parser.add_argument("--synth", type=str, help="Path to synthesized audio file")
-    parser.add_argument("--ref-dir", type=str, help="Path to reference audio directory")
-    parser.add_argument("--synth-dir", type=str, help="Path to synthesized audio directory")
+    parser = argparse.ArgumentParser(
+        description="Evaluate Chatterbox FR LoRA on the HF test split")
+    parser.add_argument("--dataset", default="amanuelbyte/acl-voice-cloning-fr-expandedtry",
+                        help="HuggingFace dataset ID")
+    parser.add_argument("--repo-id", default="amanuelbyte/chatterbox-fr-lora",
+                        help="HuggingFace model repo for LoRA weights")
+    parser.add_argument("--lora-file", default="best_lora_adapter.pt",
+                        help="LoRA weight filename in the HF repo")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Limit number of test samples to evaluate (useful for quick runs)")
+    parser.add_argument("--output-dir", default="./eval_results",
+                        help="Directory to save results CSV and summary")
+    parser.add_argument("--cache-dir", default="./data_cache",
+                        help="HF dataset cache directory")
     args = parser.parse_args()
 
-    if (not args.ref or not args.synth) and (not args.ref_dir or not args.synth_dir):
-        print("Please provide exactly one pair: either --ref and --synth, OR --ref-dir and --synth-dir")
-        return
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    evaluator = VoiceEvaluator()
+    # ------------------------------------------------------------------
+    # 1. Load the test split from HuggingFace
+    # ------------------------------------------------------------------
+    print(f"📥 Loading TEST split from {args.dataset} ...")
+    ds_test = load_dataset(args.dataset, split="test", cache_dir=args.cache_dir)
+    total = len(ds_test)
+    print(f"   Test set size: {total} rows")
 
-    # Mode 1: Single Pair Evaluation
-    if args.ref and args.synth:
-        print(f"\nEvaluating single pair:\nReference: {args.ref}\nSynthesized: {args.synth}")
-        res = evaluator.evaluate_pair(args.ref, args.synth)
-        print("\n--- RESULTS ---")
-        for k, v in res.items():
-            print(f"{k}: {v:.4f}")
-            
-    # Mode 2: Directory Batch Evaluation
-    elif args.ref_dir and args.synth_dir:
-        print(f"\nEvaluating directory:\nReference Dir: {args.ref_dir}\nSynthesized Dir: {args.synth_dir}")
-        synth_files = [f for f in os.listdir(args.synth_dir) if f.endswith('.wav')]
-        
-        all_metrics = {"PESQ": [], "MCD": [], "Speaker_Similarity": []}
-        
-        valid_files_processed = 0
-        for f in tqdm(synth_files, desc="Batch evaluation"):
-            synth_path = os.path.join(args.synth_dir, f)
-            
-            # Assume reference and synthesis filename matches.
-            # If generated as 'sample_0.wav' then we assume a 'sample_0.wav' exists in ref dir.
-            ref_path = os.path.join(args.ref_dir, f)
-            
-            if not os.path.exists(ref_path):
+    if args.max_samples and args.max_samples < total:
+        # Deterministic subsample
+        indices = list(range(0, total, total // args.max_samples))[:args.max_samples]
+        ds_test = ds_test.select(indices)
+        total = len(ds_test)
+        print(f"   Subsampled to {total} rows")
+
+    # ------------------------------------------------------------------
+    # 2. Load base model + LoRA adapter
+    # ------------------------------------------------------------------
+    print(f"\n🔧 Downloading LoRA weights '{args.lora_file}' from {args.repo_id} ...")
+    lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
+
+    print("🔧 Loading base ChatterboxMultilingualTTS ...")
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+
+    print("🔧 Injecting LoRA ...")
+    targets = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    layers = inject_lora(model.t3, targets=targets, rank=32, alpha=64.0, dropout=0.0)
+    load_lora_state(layers, lora_path, device=device)
+    model.eval()
+    print(f"   LoRA injected into {len(layers)} layers ✓\n")
+
+    # ------------------------------------------------------------------
+    # 3. Load speaker verification model
+    # ------------------------------------------------------------------
+    print("🔧 Loading ECAPA-TDNN speaker verification model ...")
+    try:
+        verifier = load_speaker_model()
+    except Exception as e:
+        print(f"   ⚠ Could not load speaker model: {e}")
+        verifier = None
+
+    # ------------------------------------------------------------------
+    # 4. Run inference + metrics on each test sample
+    # ------------------------------------------------------------------
+    results = []
+    pesq_scores, mcd_scores, spk_scores = [], [], []
+
+    print(f"\n🚀 Running evaluation on {total} test samples ...\n")
+
+    for i in tqdm(range(total), desc="Evaluating"):
+        row = ds_test[i]
+        text_fr = (row.get("trg_fr_text") or "").strip()
+        speaker_id = row.get("speaker_id", "unknown")
+        speaker_name = row.get("speaker_name", "unknown")
+
+        if not text_fr or len(text_fr) < 2:
+            continue
+
+        temp_files = []
+        try:
+            # --- Get reference audio (English voice for cross-lingual) ---
+            ref_data = row.get("ref_en_voice")
+            if ref_data is None or not isinstance(ref_data, dict):
+                ref_data = row.get("ref_fr_voice")
+            if ref_data is None or not isinstance(ref_data, dict):
                 continue
-                
-            valid_files_processed += 1
-            res = evaluator.evaluate_pair(ref_path, synth_path)
-            
-            for k, v in res.items():
-                if not np.isnan(v):
-                    all_metrics[k].append(v)
-                    
-        print(f"\n--- AVERAGE RESULTS ACROSS {valid_files_processed} FILES ---")
-        for k, vals in all_metrics.items():
-            avg = np.mean(vals) if vals else float('nan')
-            count_valid = len(vals)
-            print(f"{k}: {avg:.4f} (Calculated on {count_valid}/{valid_files_processed} valid audio instances)")
+
+            ref_array = np.asarray(ref_data["array"], dtype=np.float32)
+            ref_sr = ref_data["sampling_rate"]
+            ref_wav_path = save_temp_wav(ref_array, ref_sr, prefix="ref_")
+            temp_files.append(ref_wav_path)
+
+            # --- Get ground-truth target French audio ---
+            gt_data = row.get("trg_fr_voice")
+            if gt_data is None or not isinstance(gt_data, dict):
+                continue
+
+            gt_array = np.asarray(gt_data["array"], dtype=np.float32)
+            gt_sr = gt_data["sampling_rate"]
+            gt_wav_path = save_temp_wav(gt_array, gt_sr, prefix="gt_")
+            temp_files.append(gt_wav_path)
+
+            # --- Run inference: generate French speech ---
+            with torch.no_grad():
+                wav = model.generate(
+                    text_fr,
+                    audio_prompt_path=ref_wav_path,
+                    language_id="fr",
+                )
+
+            if not isinstance(wav, torch.Tensor):
+                continue
+
+            if wav.dim() == 1:
+                wav = wav.unsqueeze(0)
+
+            synth_wav_path = os.path.join(
+                args.output_dir, f"synth_{speaker_id}_{i:05d}.wav"
+            )
+            torchaudio.save(synth_wav_path, wav.cpu(), model.sr)
+
+            # --- Compute metrics (synthesized vs ground-truth) ---
+            p = compute_pesq_score(gt_wav_path, synth_wav_path)
+            m = compute_mcd_score(gt_wav_path, synth_wav_path)
+            s = compute_speaker_similarity(verifier, gt_wav_path, synth_wav_path) if verifier else None
+
+            if p is not None:
+                pesq_scores.append(p)
+            if m is not None:
+                mcd_scores.append(m)
+            if s is not None:
+                spk_scores.append(s)
+
+            results.append({
+                "index": i,
+                "speaker_id": speaker_id,
+                "speaker_name": speaker_name,
+                "text": text_fr[:80],
+                "PESQ": f"{p:.4f}" if p is not None else "N/A",
+                "MCD": f"{m:.4f}" if m is not None else "N/A",
+                "Speaker_Similarity": f"{s:.4f}" if s is not None else "N/A",
+            })
+
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+                print(f"   ⚠ OOM on sample {i}, skipping")
+            else:
+                print(f"   ⚠ Error on sample {i}: {e}")
+            continue
+        except Exception as e:
+            print(f"   ⚠ Error on sample {i}: {e}")
+            continue
+        finally:
+            # Clean up temp files
+            for tf in temp_files:
+                try:
+                    os.remove(tf)
+                except OSError:
+                    pass
+
+    # ------------------------------------------------------------------
+    # 5. Save results
+    # ------------------------------------------------------------------
+    # Per-sample CSV
+    csv_path = os.path.join(args.output_dir, "eval_results.csv")
+    if results:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=results[0].keys())
+            w.writeheader()
+            w.writerows(results)
+        print(f"\n📄 Per-sample results saved to: {csv_path}")
+
+    # Summary
+    summary = {
+        "dataset": args.dataset,
+        "split": "test",
+        "lora_repo": args.repo_id,
+        "lora_file": args.lora_file,
+        "total_test_samples": total,
+        "evaluated_samples": len(results),
+        "metrics": {
+            "PESQ": {
+                "mean": float(np.mean(pesq_scores)) if pesq_scores else None,
+                "std": float(np.std(pesq_scores)) if pesq_scores else None,
+                "min": float(np.min(pesq_scores)) if pesq_scores else None,
+                "max": float(np.max(pesq_scores)) if pesq_scores else None,
+                "count": len(pesq_scores),
+            },
+            "MCD": {
+                "mean": float(np.mean(mcd_scores)) if mcd_scores else None,
+                "std": float(np.std(mcd_scores)) if mcd_scores else None,
+                "min": float(np.min(mcd_scores)) if mcd_scores else None,
+                "max": float(np.max(mcd_scores)) if mcd_scores else None,
+                "count": len(mcd_scores),
+            },
+            "Speaker_Similarity": {
+                "mean": float(np.mean(spk_scores)) if spk_scores else None,
+                "std": float(np.std(spk_scores)) if spk_scores else None,
+                "min": float(np.min(spk_scores)) if spk_scores else None,
+                "max": float(np.max(spk_scores)) if spk_scores else None,
+                "count": len(spk_scores),
+            },
+        },
+    }
+
+    summary_path = os.path.join(args.output_dir, "eval_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("  EVALUATION SUMMARY")
+    print("=" * 60)
+    print(f"  Dataset:    {args.dataset} (test split)")
+    print(f"  Model:      {args.repo_id} / {args.lora_file}")
+    print(f"  Evaluated:  {len(results)} / {total} samples")
+    print("-" * 60)
+
+    if pesq_scores:
+        print(f"  PESQ:               {np.mean(pesq_scores):.4f} ± {np.std(pesq_scores):.4f}")
+    else:
+        print("  PESQ:               N/A (install: pip install pesq)")
+
+    if mcd_scores:
+        print(f"  MCD:                {np.mean(mcd_scores):.4f} ± {np.std(mcd_scores):.4f}")
+    else:
+        print("  MCD:                N/A (install: pip install pymcd)")
+
+    if spk_scores:
+        print(f"  Speaker Similarity: {np.mean(spk_scores):.4f} ± {np.std(spk_scores):.4f}")
+    else:
+        print("  Speaker Similarity: N/A (install: pip install speechbrain)")
+
+    print("=" * 60)
+    print(f"\n📄 Full results:  {csv_path}")
+    print(f"📄 Summary JSON:  {summary_path}")
+    print("✅ Done!")
+
 
 if __name__ == "__main__":
     main()
