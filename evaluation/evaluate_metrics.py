@@ -187,8 +187,14 @@ def main():
     # ------------------------------------------------------------------
     # 1. Load the test split from HuggingFace
     # ------------------------------------------------------------------
-    print(f"📥 Loading TEST split from {args.dataset} ...")
-    ds_test = load_dataset(args.dataset, split="test", cache_dir=args.cache_dir)
+    print(f"📥 Loading TEST split from {args.dataset} (skipping train split) ...")
+    # Explictly specify data_files to prevent `datasets` from downloading the massive train split
+    ds_test = load_dataset(
+        args.dataset, 
+        data_files={"test": "data/test-*.parquet"},
+        split="test", 
+        cache_dir=args.cache_dir
+    )
     total = len(ds_test)
     print(f"   Test set size: {total} rows")
 
