@@ -219,7 +219,10 @@ def main():
     targets = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     layers = inject_lora(model.t3, targets=targets, rank=32, alpha=64.0, dropout=0.0)
     load_lora_state(layers, lora_path, device=device)
-    model.eval()
+    if hasattr(model, 'eval'):
+        model.eval()
+    elif hasattr(model.t3, 'eval'):
+        model.t3.eval()
     print(f"   LoRA injected into {len(layers)} layers ✓\n")
 
     # ------------------------------------------------------------------
