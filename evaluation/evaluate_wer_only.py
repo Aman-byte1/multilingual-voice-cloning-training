@@ -40,6 +40,8 @@ def main():
                         help="HF dataset cache directory")
     parser.add_argument("--batch-size", type=int, default=32, 
                         help="ASR batch size. Higher = faster GPU saturation (32-64 is great for A40)")
+    parser.add_argument("--max-samples", type=int, default=None, 
+                        help="MUST MATCH what you passed to evaluate_metrics.py so indices align!")
     parser.add_argument("--model", default="openai/whisper-medium", 
                         help="ASR model to use for transcription")
     args = parser.parse_args()
@@ -71,6 +73,13 @@ def main():
     except Exception as e:
         print(f"❌ Failed to load dataset: {e}")
         return
+
+    # Subsample EXACTLY like evaluate_metrics.py did, so index `i` matches perfectly
+    total = len(ds_test)
+    if args.max_samples and args.max_samples < total:
+        indices = list(range(0, total, total // args.max_samples))[:args.max_samples]
+        ds_test = ds_test.select(indices)
+        print(f"   Subsampled dataset down to {len(ds_test)} rows to match generated evaluation files.")
 
     # 1. Find all generated audio files
     wav_files = glob.glob(os.path.join(args.eval_dir, "synth_*.wav"))
