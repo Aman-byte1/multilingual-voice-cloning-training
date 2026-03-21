@@ -53,7 +53,8 @@ def main():
             "automatic-speech-recognition", 
             model=args.model, 
             device=device,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            chunk_length_s=30  # Required to fix HF Whisper batching dictionary key mismatch
         )
     except Exception as e:
         print(f"❌ Failed to load ASR pipeline: {e}")

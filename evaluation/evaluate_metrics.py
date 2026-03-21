@@ -262,7 +262,7 @@ def main():
     print("🔧 Loading Whisper ASR model for WER ...")
     try:
         from transformers import pipeline
-        asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-medium", device=device)
+        asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-medium", device=device, chunk_length_s=30)
     except Exception as e:
         print(f"   ⚠ Could not load Whisper ASR: {e}")
         asr_pipe = None
