@@ -103,12 +103,19 @@ def main():
 
     # 3. Transcribe audio files in hyper-fast batches
     print(f"\n🎙 Transcribing {len(eval_items)} audio files in batches of {args.batch_size} ...")
-    paths = [item["path"] for item in eval_items]
+    
+    import librosa
+    def audio_generator():
+        for item in eval_items:
+            # Load and automatically resample to 16kHz for Whisper to bypass FFmpeg
+            audio, _ = librosa.load(item["path"], sr=16000)
+            yield audio
+
     transcriptions = []
     
-    # We pass the paths directly to the pipeline. Because batch_size was set in pipeline init,
+    # We pass a generator of raw audio arrays. Because batch_size was set in pipeline init,
     # it automatically collates and GPU-batches the data behind the scenes.
-    for out in tqdm(asr_pipe(paths, generate_kwargs={"language": "french"}), total=len(paths), desc="Batch processing"):
+    for out in tqdm(asr_pipe(audio_generator(), generate_kwargs={"language": "french"}), total=len(eval_items), desc="Batch processing"):
         transcriptions.append(out["text"])
 
     # 4. Calculate WER

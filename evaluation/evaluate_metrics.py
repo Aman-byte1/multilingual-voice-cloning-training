@@ -150,7 +150,10 @@ def compute_wer_score(reference_text: str, synth_wav_path: str, asr_pipe) -> Opt
     """Word Error Rate using Whisper."""
     try:
         import jiwer
-        transcription = asr_pipe(synth_wav_path, generate_kwargs={"language": "french"})["text"]
+        import librosa
+        # Bypass FFmpeg by loading the audio natively first
+        audio, _ = librosa.load(synth_wav_path, sr=16000)
+        transcription = asr_pipe(audio, generate_kwargs={"language": "french"})["text"]
         
         # Clean up text (lowercase, remove punctuation)
         ref_clean = jiwer.RemovePunctuation()(reference_text.lower())
