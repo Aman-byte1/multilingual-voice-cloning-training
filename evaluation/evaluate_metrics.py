@@ -11,10 +11,11 @@ Pipeline:
      - Mel Cepstral Distortion (MCD)
      - Perceptual Evaluation of Speech Quality (PESQ)
      - Word Error Rate (WER) using Whisper
+     - Content Translation Quality (chrF++, COMET)
   5. Outputs per-sample CSV + aggregate summary
 
 Prerequisites:
-    pip install pesq pymcd speechbrain librosa datasets huggingface_hub torchaudio jiwer transformers
+    pip install pesq pymcd speechbrain librosa datasets huggingface_hub torchaudio jiwer transformers sacrebleu unbabel-comet
 
 Usage:
     python evaluation/evaluate_metrics.py
@@ -166,6 +167,29 @@ def compute_wer_score(reference_text: str, synth_wav_path: str, asr_pipe) -> Opt
         return None
 
 
+def compute_chrf_score(reference_text: str, transcription: str) -> Optional[float]:
+    try:
+        import sacrebleu
+        if not transcription.strip(): return 0.0
+        return float(sacrebleu.sentence_chrf(transcription, [reference_text]).score)
+    except Exception:
+        return None
+
+def load_comet_model(device="cuda"):
+    try:
+        from comet import download_model, load_from_checkpoint
+        import logging
+        logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+        model_path = download_model("Unbabel/wmt22-comet-da")
+        model = load_from_checkpoint(model_path)
+        model.eval()
+        if device == "cuda":
+            model.cuda()
+        return model
+    except Exception as e:
+        print(f"   ⚠ Could not load COMET: {e}")
+        return None
+
 # ---------------------------------------------------------------------------
 # Helpers — save numpy audio to a temp WAV
 # ---------------------------------------------------------------------------
@@ -266,18 +290,22 @@ def main():
     except Exception as e:
         print(f"   ⚠ Could not load Whisper ASR: {e}")
         asr_pipe = None
+        
+    print("🔧 Loading COMET model for Translation Quality ...")
+    comet_model = load_comet_model(device=device)
 
     # ------------------------------------------------------------------
     # 5. Run inference + metrics on each test sample
     # ------------------------------------------------------------------
     results = []
-    pesq_scores, mcd_scores, spk_scores, wer_scores = [], [], [], []
+    pesq_scores, mcd_scores, spk_scores, wer_scores, chrf_scores, comet_scores = [], [], [], [], [], []
 
     print(f"\n🚀 Running evaluation on {total} test samples ...\n")
 
     for i in tqdm(range(total), desc="Evaluating"):
         row = ds_test[i]
         text_fr = (row.get("trg_fr_text") or "").strip()
+        text_en = (row.get("ref_en_text") or "").strip()
         speaker_id = row.get("speaker_id", "unknown")
         speaker_name = row.get("speaker_name", "unknown")
 
@@ -331,26 +359,44 @@ def main():
             p = compute_pesq_score(gt_wav_path, synth_wav_path)
             m = compute_mcd_score(gt_wav_path, synth_wav_path)
             s = compute_speaker_similarity(verifier, gt_wav_path, synth_wav_path) if verifier else None
-            w = compute_wer_score(text_fr, synth_wav_path, asr_pipe) if asr_pipe else None
-
-            if p is not None:
-                pesq_scores.append(p)
-            if m is not None:
-                mcd_scores.append(m)
-            if s is not None:
-                spk_scores.append(s)
-            if w is not None:
-                wer_scores.append(w)
+            
+            w, chrf_val, comet_val = None, None, None
+            if asr_pipe:
+                import librosa
+                audio, _ = librosa.load(synth_wav_path, sr=16000)
+                transcription = asr_pipe(audio, generate_kwargs={"language": "french"})["text"]
+                
+                import jiwer
+                ref_clean = jiwer.RemovePunctuation()(text_fr.lower())
+                hyp_clean = jiwer.RemovePunctuation()(transcription.lower())
+                if ref_clean: w = float(jiwer.wer(ref_clean, hyp_clean))
+                
+                chrf_val = compute_chrf_score(text_fr, transcription)
+                
+                if comet_model and text_en:
+                    data = [{"src": text_en, "mt": transcription, "ref": text_fr}]
+                    try:
+                        comet_val = comet_model.predict(data, batch_size=1, gpus=1 if device=="cuda" else 0).scores[0]
+                    except: pass
+                    
+            if p is not None: pesq_scores.append(p)
+            if m is not None: mcd_scores.append(m)
+            if s is not None: spk_scores.append(s)
+            if w is not None: wer_scores.append(w)
+            if chrf_val is not None: chrf_scores.append(chrf_val)
+            if comet_val is not None: comet_scores.append(comet_val)
 
             results.append({
                 "index": i,
                 "speaker_id": speaker_id,
-                "speaker_name": speaker_name,
-                "text": text_fr[:80],
+                "source_text_en": text_en[:50],
+                "target_text_fr": text_fr[:50],
                 "PESQ": f"{p:.4f}" if p is not None else "N/A",
                 "MCD": f"{m:.4f}" if m is not None else "N/A",
                 "Speaker_Similarity": f"{s:.4f}" if s is not None else "N/A",
                 "WER": f"{w:.4f}" if w is not None else "N/A",
+                "chrF++": f"{chrf_val:.4f}" if chrf_val is not None else "N/A",
+                "COMET": f"{comet_val:.4f}" if comet_val is not None else "N/A",
             })
 
         except RuntimeError as e:
@@ -420,6 +466,20 @@ def main():
                 "max": float(np.max(wer_scores)) if wer_scores else None,
                 "count": len(wer_scores),
             },
+            "chrF++": {
+                "mean": float(np.mean(chrf_scores)) if chrf_scores else None,
+                "std": float(np.std(chrf_scores)) if chrf_scores else None,
+                "min": float(np.min(chrf_scores)) if chrf_scores else None,
+                "max": float(np.max(chrf_scores)) if chrf_scores else None,
+                "count": len(chrf_scores),
+            },
+            "COMET": {
+                "mean": float(np.mean(comet_scores)) if comet_scores else None,
+                "std": float(np.std(comet_scores)) if comet_scores else None,
+                "min": float(np.min(comet_scores)) if comet_scores else None,
+                "max": float(np.max(comet_scores)) if comet_scores else None,
+                "count": len(comet_scores),
+            },
         },
     }
 
@@ -455,6 +515,16 @@ def main():
         print(f"  WER:                {np.mean(wer_scores):.4f} ± {np.std(wer_scores):.4f}")
     else:
         print("  WER:                N/A (install: pip install jiwer transformers)")
+        
+    if chrf_scores:
+        print(f"  chrF++:             {np.mean(chrf_scores):.4f} ± {np.std(chrf_scores):.4f}")
+    else:
+        print("  chrF++:             N/A (install: pip install sacrebleu)")
+        
+    if comet_scores:
+        print(f"  COMET:              {np.mean(comet_scores):.4f} ± {np.std(comet_scores):.4f}")
+    else:
+        print("  COMET:              N/A (install: pip install unbabel-comet)")
 
     print("=" * 60)
     print(f"\n📄 Full results:  {csv_path}")
