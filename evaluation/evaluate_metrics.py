@@ -337,8 +337,8 @@ def main():
             temp_files.append(gt_wav_path)
 
             # --- Run inference: generate French speech ---
-            # OPTIMIZATION: inference_mode + fp16 autocast easily doubles batch=1 AR generation speed!
-            with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+            # Inference mode enabled for speed, running in pure FP32 (Full Precision) as requested!
+            with torch.inference_mode():
                 wav = model.generate(
                     text_fr,
                     audio_prompt_path=ref_wav_path,
