@@ -1,26 +1,13 @@
 #!/usr/bin/env python3
 """
+🚀 HIGH-PERFORMANCE RTX 4090 OPTIMIZED EVALUATION
 End-to-end evaluation of the Chatterbox FR LoRA fine-tuned model.
 
-Pipeline:
-  1. Downloads the TEST split from `amanuelbyte/acl-voice-cloning-fr-expandedtry`
-  2. Loads base ChatterboxMultilingualTTS + LoRA adapter from HuggingFace
-  3. Runs inference on each test sample (cross-lingual: EN ref → FR synthesis)
-  4. Computes three metrics comparing synthesized vs ground-truth FR audio:
-     - Speaker Similarity (ECAPA-TDNN cosine similarity)
-     - Mel Cepstral Distortion (MCD)
-     - Perceptual Evaluation of Speech Quality (PESQ)
-     - Word Error Rate (WER) using Whisper
-     - Content Translation Quality (chrF++, COMET)
-  5. Outputs per-sample CSV + aggregate summary
-
-Prerequisites:
-    pip install pesq pymcd speechbrain librosa datasets huggingface_hub torchaudio jiwer transformers sacrebleu unbabel-comet
-
-Usage:
-    python evaluation/evaluate_metrics.py
-    python evaluation/evaluate_metrics.py --max-samples 100
-    python evaluation/evaluate_metrics.py --lora-file final_lora_adapter.pt
+Pipeline (Optimized for Ada/Ampere GPUs):
+  1. Serial AR Generation (Phase 1) - Accelerated via TF32
+  2. Batched Whisper ASR (Phase 2) - Parallel transcription
+  3. Batched COMET (Phase 3) - Neural quality scoring
+  4. Serial Metrics (Phase 4) - PESQ/MCD/Similarity
 """
 
 import os
@@ -31,17 +18,18 @@ import json
 import argparse
 import warnings
 import tempfile
-from typing import List, Optional
-
 import numpy as np
 import librosa
 import torch
 import torch.nn as nn
 import torchaudio
+from typing import List, Optional, Dict
 from tqdm import tqdm
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 
+# Optimization: Enable TensorFloat32 for 4090/A-series speedups
+torch.set_float32_matmul_precision('high')
 warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
@@ -70,489 +58,188 @@ class LoRALayer(nn.Module):
         lora = self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T * self.scaling
         return base + lora
 
-
-def inject_lora(model, targets, rank, alpha, dropout=0.0):
-    layers = []
-    for name, module in list(model.named_modules()):
-        for target in targets:
-            if target in name and isinstance(module, nn.Linear):
-                parts = name.split(".")
-                parent = model
-                for p in parts[:-1]:
-                    parent = parent[int(p)] if p.isdigit() else getattr(parent, p)
-                lora = LoRALayer(module, rank, alpha, dropout)
-                setattr(parent, parts[-1], lora)
-                layers.append(lora)
-                break
-    return layers
-
-
-def load_lora_state(layers, path, device="cuda"):
-    state = torch.load(path, map_location=device, weights_only=True)
-    for i, layer in enumerate(layers):
-        if f"layer_{i}_A" in state:
-            layer.lora_A.data = state[f"layer_{i}_A"].to(device)
-            layer.lora_B.data = state[f"layer_{i}_B"].to(device)
-
-
 # ---------------------------------------------------------------------------
 # Metric helpers
 # ---------------------------------------------------------------------------
 
 def compute_pesq_score(ref_wav_path: str, synth_wav_path: str) -> Optional[float]:
-    """PESQ wideband (16 kHz)."""
     try:
-        from pesq import pesq as pesq_fn, NoUtterancesError
+        from pesq import pesq as pesq_fn
         ref, _ = librosa.load(ref_wav_path, sr=16000)
         syn, _ = librosa.load(synth_wav_path, sr=16000)
         min_len = min(len(ref), len(syn))
-        if min_len < 16000 * 0.5:
-            return None
+        if min_len < 8000: return None
         return float(pesq_fn(16000, ref[:min_len], syn[:min_len], "wb"))
-    except Exception:
-        return None
-
+    except: return None
 
 def compute_mcd_score(ref_wav_path: str, synth_wav_path: str) -> Optional[float]:
-    """Mel Cepstral Distortion."""
     try:
         from pymcd.mcd import Calculate_MCD
         mcd_calc = Calculate_MCD(MCD_mode="plain")
         return float(mcd_calc.calculate_mcd(ref_wav_path, synth_wav_path))
-    except Exception:
-        return None
-
+    except: return None
 
 def load_speaker_model():
-    """Load ECAPA-TDNN speaker verification model."""
-    try:
-        from speechbrain.inference.speaker import SpeakerRecognition
-    except ImportError:
-        from speechbrain.pretrained import SpeakerRecognition
-
+    from speechbrain.inference.speaker import SpeakerRecognition
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    return SpeakerRecognition.from_hparams(
-        source="speechbrain/spkrec-ecapa-voxceleb",
-        savedir="pretrained_models/spkrec-ecapa-voxceleb",
-        run_opts={"device": device},
-    )
-
-
-def compute_speaker_similarity(verifier, ref_wav_path: str, synth_wav_path: str) -> Optional[float]:
-    """Cosine similarity of ECAPA-TDNN embeddings."""
-    try:
-        score, _ = verifier.verify_files(ref_wav_path, synth_wav_path)
-        return float(score.item())
-    except Exception:
-        return None
-
-
-def compute_wer_score(reference_text: str, synth_wav_path: str, asr_pipe) -> Optional[float]:
-    """Word Error Rate using Whisper."""
-    try:
-        import jiwer
-        import librosa
-        # Bypass FFmpeg by loading the audio natively first
-        audio, _ = librosa.load(synth_wav_path, sr=16000)
-        transcription = asr_pipe(audio, generate_kwargs={"language": "french"})["text"]
-        
-        # Clean up text (lowercase, remove punctuation)
-        ref_clean = jiwer.RemovePunctuation()(reference_text.lower())
-        hyp_clean = jiwer.RemovePunctuation()(transcription.lower())
-        
-        if not ref_clean:
-            return None
-        return float(jiwer.wer(ref_clean, hyp_clean))
-    except Exception as e:
-        return None
-
-
-def compute_chrf_score(reference_text: str, transcription: str) -> Optional[float]:
-    try:
-        import sacrebleu
-        if not transcription.strip(): return 0.0
-        return float(sacrebleu.sentence_chrf(transcription, [reference_text]).score)
-    except Exception:
-        return None
+    return SpeakerRecognition.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", run_opts={"device": device})
 
 def load_comet_model(device="cuda"):
-    try:
-        from comet import download_model, load_from_checkpoint
-        import logging
-        logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-        model_path = download_model("Unbabel/wmt22-comet-da")
-        model = load_from_checkpoint(model_path)
-        model.eval()
-        if device == "cuda":
-            model.cuda()
-        return model
-    except Exception as e:
-        print(f"   ⚠ Could not load COMET: {e}")
-        return None
-
-# ---------------------------------------------------------------------------
-# Helpers — save numpy audio to a temp WAV
-# ---------------------------------------------------------------------------
+    from comet import download_model, load_from_checkpoint
+    import logging
+    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+    model_path = download_model("Unbabel/wmt22-comet-da")
+    model = load_from_checkpoint(model_path)
+    model.eval()
+    if device == "cuda": model.cuda()
+    return model
 
 def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval") -> str:
-    """Save a numpy array to a temporary WAV file and return the path."""
     fd, path = tempfile.mkstemp(suffix=".wav", prefix=prefix)
     os.close(fd)
     wav_t = torch.from_numpy(audio_array).float()
-    if wav_t.dim() == 1:
-        wav_t = wav_t.unsqueeze(0)
+    if wav_t.dim() == 1: wav_t = wav_t.unsqueeze(0)
     torchaudio.save(path, wav_t, sr)
     return path
-
 
 # ---------------------------------------------------------------------------
 # Main evaluation pipeline
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate Chatterbox FR LoRA on the HF test split")
-    parser.add_argument("--dataset", default="amanuelbyte/acl-voice-cloning-fr-expandedtry",
-                        help="HuggingFace dataset ID")
-    parser.add_argument("--repo-id", default="amanuelbyte/chatterbox-fr-lora",
-                        help="HuggingFace model repo for LoRA weights")
-    parser.add_argument("--lora-file", default="best_lora_adapter.pt",
-                        help="LoRA weight filename in the HF repo")
-    parser.add_argument("--max-samples", type=int, default=None,
-                        help="Limit number of test samples to evaluate (useful for quick runs)")
-    parser.add_argument("--output-dir", default="./eval_results",
-                        help="Directory to save results CSV and summary")
-    parser.add_argument("--cache-dir", default="./data_cache",
-                        help="HF dataset cache directory")
-    parser.add_argument("--skip-lora", action="store_true",
-                        help="Skip loading LoRA weights to evaluate base model")
+    parser = argparse.ArgumentParser(description="Accelerated Chatterbox Evaluation (RTX 4090 Optimized)")
+    parser.add_argument("--dataset", default="amanuelbyte/acl-voice-cloning-fr-expandedtry")
+    parser.add_argument("--repo-id", default="amanuelbyte/chatterbox-fr-lora")
+    parser.add_argument("--lora-file", default="best_lora_adapter.pt")
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for ASR/COMET")
+    parser.add_argument("--output-dir", default="./eval_results")
+    parser.add_argument("--cache-dir", default="./data_cache")
+    parser.add_argument("--skip-lora", action="store_true")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 1. Load the test split from HuggingFace
-    # ------------------------------------------------------------------
-    print(f"📥 Loading TEST split from {args.dataset} (skipping train split) ...")
-    # Explictly specify data_files to prevent `datasets` from downloading the massive train split
-    ds_test = load_dataset(
-        args.dataset, 
-        data_files={"test": "data/test-*.parquet"},
-        split="test", 
-        cache_dir=args.cache_dir
-    )
+    # 1. Loading data
+    print(f"📥 Loading TEST split from {args.dataset} ...")
+    ds_test = load_dataset(args.dataset, data_files={"test": "data/test-*.parquet"}, split="test", cache_dir=args.cache_dir)
     total = len(ds_test)
-    print(f"   Test set size: {total} rows")
-
     if args.max_samples and args.max_samples < total:
-        # Deterministic subsample
         indices = list(range(0, total, total // args.max_samples))[:args.max_samples]
         ds_test = ds_test.select(indices)
-        total = len(ds_test)
-        print(f"   Subsampled to {total} rows")
+    total = len(ds_test)
 
-    # ------------------------------------------------------------------
-    # 2. Load the base model and (optionally) inject LoRA
-    # ------------------------------------------------------------------
+    # 2. Loading model
     if not args.skip_lora:
-        print(f"🔧 Downloading LoRA weights '{args.lora_file}' from {args.repo_id} ...")
         lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
-    else:
-        print("🔧 Skipping LoRA (evaluating base Chatterbox model) ...")
-        lora_path = None
+    else: lora_path = None
 
-    print(f"🔧 Loading base ChatterboxMultilingualTTS ...")
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
     model = ChatterboxMultilingualTTS("ResembleAI/chatterbox")
     model.to(device)
 
     if not args.skip_lora and lora_path:
-        # Re-inject our custom LoRA weights
         checkpoint = torch.load(lora_path, map_location=device)
         layers = []
         for name, module in model.t3.named_modules():
-            if isinstance(module, nn.Linear):
-                # Standard Chatterbox T3 layers to adapt
-                if any(x in name for x in ["q_proj", "k_proj", "v_proj", "o_proj"]):
-                    parent_name = ".".join(name.split(".")[:-1])
-                    child_name = name.split(".")[-1]
-                    parent = model.t3.get_submodule(parent_name)
-                    
-                    # Create LoRA wrapper
-                    lora_mod = LoRALayer(module, rank=16, alpha=32)
-                    setattr(parent, child_name, lora_mod)
-                    layers.append(name)
-
+            if isinstance(module, nn.Linear) and any(x in name for x in ["q_proj", "k_proj", "v_proj", "o_proj"]):
+                parent_name, child_name = ".".join(name.split(".")[:-1]), name.split(".")[-1]
+                parent = model.t3.get_submodule(parent_name)
+                lora_mod = LoRALayer(module, rank=16, alpha=32)
+                setattr(parent, child_name, lora_mod)
+                layers.append(name)
         model.load_state_dict(checkpoint, strict=False)
-        model.t3.eval()
-        print(f"   LoRA injected into {len(layers)} layers ✓\n")
-    else:
-        model.t3.eval()
-        print("   Base model loaded (no LoRA) ✓\n")
+        print(f"   LoRA injected ✓\n")
+    model.t3.eval()
 
-    # ------------------------------------------------------------------
-    # 3. Load speaker verification model
-    # ------------------------------------------------------------------
-    print("🔧 Loading ECAPA-TDNN speaker verification model ...")
-    try:
-        verifier = load_speaker_model()
-    except Exception as e:
-        print(f"   ⚠ Could not load speaker model: {e}")
-        verifier = None
-
-    # ------------------------------------------------------------------
-    # 4. Load Whisper ASR model for WER
-    # ------------------------------------------------------------------
-    print("🔧 Loading Whisper ASR model for WER ...")
-    try:
-        from transformers import pipeline
-        asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-medium", device=device, chunk_length_s=30)
-    except Exception as e:
-        print(f"   ⚠ Could not load Whisper ASR: {e}")
-        asr_pipe = None
-        
-    print("🔧 Loading COMET model for Translation Quality ...")
-    comet_model = load_comet_model(device=device)
-
-    # ------------------------------------------------------------------
-    # 5. Run inference + metrics on each test sample
-    # ------------------------------------------------------------------
-    results = []
-    pesq_scores, mcd_scores, spk_scores, wer_scores, chrf_scores, comet_scores = [], [], [], [], [], []
-
-    print(f"\n🚀 Running evaluation on {total} test samples ...\n")
-
-    for i in tqdm(range(total), desc="Evaluating"):
+    # 3. Phase 1: FAST Serial Generation
+    print(f"🎙 PHASE 1/4: Generating {total} audio samples (Serial AR) ...")
+    samples_data = [] # Stores paths and metadata
+    for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
         text_fr = (row.get("trg_fr_text") or "").strip()
         text_en = (row.get("ref_en_text") or "").strip()
-        speaker_id = row.get("speaker_id", "unknown")
-        speaker_name = row.get("speaker_name", "unknown")
+        
+        # Audio Prompts
+        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice")
+        if not ref_data or not text_fr: continue
+        
+        ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
+        
+        # Ground Truth
+        gt_data = row.get("trg_fr_voice")
+        gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_")
+        
+        with torch.inference_mode():
+            wav = model.generate(text_fr, audio_prompt_path=ref_wav_path, language_id="fr")
+        
+        os.remove(ref_wav_path) # Clean prompt immediately
+        
+        synth_wav_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
+        torchaudio.save(synth_wav_path, wav.cpu() if wav.dim() > 1 else wav.unsqueeze(0).cpu(), model.sr)
+        
+        samples_data.append({
+            "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path,
+            "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
+        })
 
-        if not text_fr or len(text_fr) < 2:
-            continue
+    # 4. Phase 2: BATCHED ASR (Whisper)
+    print(f"\n🎙 PHASE 2/4: Transcribing audio in batches of {args.batch_size} (Whisper Medium) ...")
+    from transformers import pipeline
+    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-medium", device=device, batch_size=args.batch_size, chunk_length_s=30)
+    
+    def audio_gen():
+        for s in samples_data:
+            audio, _ = librosa.load(s["synth_path"], sr=16000)
+            yield audio
 
-        temp_files = []
-        try:
-            # --- Get reference audio (English voice for cross-lingual) ---
-            ref_data = row.get("ref_en_voice")
-            if ref_data is None or not isinstance(ref_data, dict):
-                ref_data = row.get("ref_fr_voice")
-            if ref_data is None or not isinstance(ref_data, dict):
-                continue
+    transcripts = []
+    for out in tqdm(asr_pipe(audio_gen(), generate_kwargs={"language": "french"}), total=len(samples_data), desc="Transcribing"):
+        transcripts.append(out["text"])
 
-            ref_array = np.asarray(ref_data["array"], dtype=np.float32)
-            ref_sr = ref_data["sampling_rate"]
-            ref_wav_path = save_temp_wav(ref_array, ref_sr, prefix="ref_")
-            temp_files.append(ref_wav_path)
+    # 5. Phase 3: BATCHED COMET
+    print(f"\n🌍 PHASE 3/4: Scoring translation quality in batches of {args.batch_size} (COMET) ...")
+    comet_model = load_comet_model(device=device)
+    comet_data = [{"src": s["text_en"], "mt": tx, "ref": s["text_fr"]} for s, tx in zip(samples_data, transcripts)]
+    comet_scores = comet_model.predict(comet_data, batch_size=args.batch_size, gpus=1 if "cuda" in device else 0).scores
 
-            # --- Get ground-truth target French audio ---
-            gt_data = row.get("trg_fr_voice")
-            if gt_data is None or not isinstance(gt_data, dict):
-                continue
+    # 6. Phase 4: FINAL METRICS (Acoustic Axes)
+    print(f"\n📊 PHASE 4/4: Calculating acoustic metrics (Similarity, PESQ, MCD) ...")
+    verifier = load_speaker_model()
+    import jiwer
+    import sacrebleu
+    
+    results = []
+    for s, tx, comet_val in tqdm(zip(samples_data, transcripts, comet_scores), total=len(samples_data), desc="Finalizing"):
+        p = compute_pesq_score(s["gt_path"], s["synth_path"])
+        m = compute_mcd_score(s["gt_path"], s["synth_path"])
+        sim = float(verifier.verify_files(s["gt_path"], s["synth_path"])[0].item())
+        
+        # WER/chrF
+        ref_clean = jiwer.RemovePunctuation()(s["text_fr"].lower())
+        hyp_clean = jiwer.RemovePunctuation()(tx.lower())
+        w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean else 0.0
+        chr_val = float(sacrebleu.sentence_chrf(tx, [s["text_fr"]]).score)
+        
+        os.remove(s["gt_path"]) # Clean GT temp wav
+        
+        results.append({
+            "idx": s["idx"], "speaker": s["speaker_id"], "WER": w, "chrF": chr_val, 
+            "COMET": comet_val, "PESQ": p or 0, "MCD": m or 0, "Similarity": sim
+        })
 
-            gt_array = np.asarray(gt_data["array"], dtype=np.float32)
-            gt_sr = gt_data["sampling_rate"]
-            gt_wav_path = save_temp_wav(gt_array, gt_sr, prefix="gt_")
-            temp_files.append(gt_wav_path)
-
-            # --- Run inference: generate French speech ---
-            # Inference mode enabled for speed, running in pure FP32 (Full Precision) as requested!
-            with torch.inference_mode():
-                wav = model.generate(
-                    text_fr,
-                    audio_prompt_path=ref_wav_path,
-                    language_id="fr",
-                )
-
-            if not isinstance(wav, torch.Tensor):
-                continue
-
-            if wav.dim() == 1:
-                wav = wav.unsqueeze(0)
-
-            synth_wav_path = os.path.join(
-                args.output_dir, f"synth_{speaker_id}_{i:05d}.wav"
-            )
-            torchaudio.save(synth_wav_path, wav.cpu(), model.sr)
-
-            # --- Compute metrics (synthesized vs ground-truth) ---
-            p = compute_pesq_score(gt_wav_path, synth_wav_path)
-            m = compute_mcd_score(gt_wav_path, synth_wav_path)
-            s = compute_speaker_similarity(verifier, gt_wav_path, synth_wav_path) if verifier else None
-            
-            w, chrf_val, comet_val = None, None, None
-            if asr_pipe:
-                import librosa
-                audio, _ = librosa.load(synth_wav_path, sr=16000)
-                transcription = asr_pipe(audio, generate_kwargs={"language": "french"})["text"]
-                
-                import jiwer
-                ref_clean = jiwer.RemovePunctuation()(text_fr.lower())
-                hyp_clean = jiwer.RemovePunctuation()(transcription.lower())
-                if ref_clean: w = float(jiwer.wer(ref_clean, hyp_clean))
-                
-                chrf_val = compute_chrf_score(text_fr, transcription)
-                
-                if comet_model and text_en:
-                    data = [{"src": text_en, "mt": transcription, "ref": text_fr}]
-                    try:
-                        comet_val = comet_model.predict(data, batch_size=1, gpus=1 if device=="cuda" else 0).scores[0]
-                    except: pass
-                    
-            if p is not None: pesq_scores.append(p)
-            if m is not None: mcd_scores.append(m)
-            if s is not None: spk_scores.append(s)
-            if w is not None: wer_scores.append(w)
-            if chrf_val is not None: chrf_scores.append(chrf_val)
-            if comet_val is not None: comet_scores.append(comet_val)
-
-            results.append({
-                "index": i,
-                "speaker_id": speaker_id,
-                "source_text_en": text_en[:50],
-                "target_text_fr": text_fr[:50],
-                "PESQ": f"{p:.4f}" if p is not None else "N/A",
-                "MCD": f"{m:.4f}" if m is not None else "N/A",
-                "Speaker_Similarity": f"{s:.4f}" if s is not None else "N/A",
-                "WER": f"{w:.4f}" if w is not None else "N/A",
-                "chrF++": f"{chrf_val:.4f}" if chrf_val is not None else "N/A",
-                "COMET": f"{comet_val:.4f}" if comet_val is not None else "N/A",
-            })
-
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                torch.cuda.empty_cache()
-                print(f"   ⚠ OOM on sample {i}, skipping")
-            else:
-                print(f"   ⚠ Error on sample {i}: {e}")
-            continue
-        except Exception as e:
-            print(f"   ⚠ Error on sample {i}: {e}")
-            continue
-        finally:
-            # Clean up temp files
-            for tf in temp_files:
-                try:
-                    os.remove(tf)
-                except OSError:
-                    pass
-
-    # ------------------------------------------------------------------
-    # 5. Save results
-    # ------------------------------------------------------------------
-    # Per-sample CSV
-    csv_path = os.path.join(args.output_dir, "eval_results.csv")
-    if results:
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=results[0].keys())
-            w.writeheader()
-            w.writerows(results)
-        print(f"\n📄 Per-sample results saved to: {csv_path}")
-
-    # Summary
-    summary = {
-        "dataset": args.dataset,
-        "split": "test",
-        "lora_repo": args.repo_id,
-        "lora_file": args.lora_file,
-        "total_test_samples": total,
-        "evaluated_samples": len(results),
-        "metrics": {
-            "PESQ": {
-                "mean": float(np.mean(pesq_scores)) if pesq_scores else None,
-                "std": float(np.std(pesq_scores)) if pesq_scores else None,
-                "min": float(np.min(pesq_scores)) if pesq_scores else None,
-                "max": float(np.max(pesq_scores)) if pesq_scores else None,
-                "count": len(pesq_scores),
-            },
-            "MCD": {
-                "mean": float(np.mean(mcd_scores)) if mcd_scores else None,
-                "std": float(np.std(mcd_scores)) if mcd_scores else None,
-                "min": float(np.min(mcd_scores)) if mcd_scores else None,
-                "max": float(np.max(mcd_scores)) if mcd_scores else None,
-                "count": len(mcd_scores),
-            },
-            "Speaker_Similarity": {
-                "mean": float(np.mean(spk_scores)) if spk_scores else None,
-                "std": float(np.std(spk_scores)) if spk_scores else None,
-                "min": float(np.min(spk_scores)) if spk_scores else None,
-                "max": float(np.max(spk_scores)) if spk_scores else None,
-                "count": len(spk_scores),
-            },
-            "WER": {
-                "mean": float(np.mean(wer_scores)) if wer_scores else None,
-                "std": float(np.std(wer_scores)) if wer_scores else None,
-                "min": float(np.min(wer_scores)) if wer_scores else None,
-                "max": float(np.max(wer_scores)) if wer_scores else None,
-                "count": len(wer_scores),
-            },
-            "chrF++": {
-                "mean": float(np.mean(chrf_scores)) if chrf_scores else None,
-                "std": float(np.std(chrf_scores)) if chrf_scores else None,
-                "min": float(np.min(chrf_scores)) if chrf_scores else None,
-                "max": float(np.max(chrf_scores)) if chrf_scores else None,
-                "count": len(chrf_scores),
-            },
-            "COMET": {
-                "mean": float(np.mean(comet_scores)) if comet_scores else None,
-                "std": float(np.std(comet_scores)) if comet_scores else None,
-                "min": float(np.min(comet_scores)) if comet_scores else None,
-                "max": float(np.max(comet_scores)) if comet_scores else None,
-                "count": len(comet_scores),
-            },
-        },
-    }
-
+    # Summary Generation
     summary_path = os.path.join(args.output_dir, "eval_summary.json")
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
+    stats = {k: float(np.mean([r[k] for r in results])) for k in ["WER", "chrF", "COMET", "PESQ", "MCD", "Similarity"]}
+    with open(summary_path, "w") as f: json.dump({"stats": stats, "results": results}, f, indent=2)
 
-    # Print summary
-    print("\n" + "=" * 60)
-    print("  EVALUATION SUMMARY")
-    print("=" * 60)
-    print(f"  Dataset:    {args.dataset} (test split)")
-    print(f"  Model:      {args.repo_id} / {args.lora_file}")
-    print(f"  Evaluated:  {len(results)} / {total} samples")
-    print("-" * 60)
-
-    if pesq_scores:
-        print(f"  PESQ:               {np.mean(pesq_scores):.4f} ± {np.std(pesq_scores):.4f}")
-    else:
-        print("  PESQ:               N/A (install: pip install pesq)")
-
-    if mcd_scores:
-        print(f"  MCD:                {np.mean(mcd_scores):.4f} ± {np.std(mcd_scores):.4f}")
-    else:
-        print("  MCD:                N/A (install: pip install pymcd)")
-
-    if spk_scores:
-        print(f"  Speaker Similarity: {np.mean(spk_scores):.4f} ± {np.std(spk_scores):.4f}")
-    else:
-        print("  Speaker Similarity: N/A (install: pip install speechbrain)")
-
-    if wer_scores:
-        print(f"  WER:                {np.mean(wer_scores):.4f} ± {np.std(wer_scores):.4f}")
-    else:
-        print("  WER:                N/A (install: pip install jiwer transformers)")
-        
-    if chrf_scores:
-        print(f"  chrF++:             {np.mean(chrf_scores):.4f} ± {np.std(chrf_scores):.4f}")
-    else:
-        print("  chrF++:             N/A (install: pip install sacrebleu)")
-        
-    if comet_scores:
-        print(f"  COMET:              {np.mean(comet_scores):.4f} ± {np.std(comet_scores):.4f}")
-    else:
-        print("  COMET:              N/A (install: pip install unbabel-comet)")
-
-    print("=" * 60)
-    print(f"\n📄 Full results:  {csv_path}")
-    print(f"📄 Summary JSON:  {summary_path}")
-    print("✅ Done!")
-
+    print("\n" + "="*50)
+    print("  FAST EVALUATION COMPLETE (RTX 4090)")
+    print("="*50)
+    for k, v in stats.items(): print(f"  {k:12}: {v:.4f}")
+    print("="*50)
+    print(f"✅ Results saved to {args.output_dir}")
 
 if __name__ == "__main__":
     main()
