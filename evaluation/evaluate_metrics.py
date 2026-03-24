@@ -224,6 +224,8 @@ def main():
                         help="Directory to save results CSV and summary")
     parser.add_argument("--cache-dir", default="./data_cache",
                         help="HF dataset cache directory")
+    parser.add_argument("--skip-lora", action="store_true",
+                        help="Skip loading LoRA weights to evaluate base model")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -251,24 +253,43 @@ def main():
         print(f"   Subsampled to {total} rows")
 
     # ------------------------------------------------------------------
-    # 2. Load base model + LoRA adapter
+    # 2. Load the base model and (optionally) inject LoRA
     # ------------------------------------------------------------------
-    print(f"\n🔧 Downloading LoRA weights '{args.lora_file}' from {args.repo_id} ...")
-    lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
+    if not args.skip_lora:
+        print(f"🔧 Downloading LoRA weights '{args.lora_file}' from {args.repo_id} ...")
+        lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
+    else:
+        print("🔧 Skipping LoRA (evaluating base Chatterbox model) ...")
+        lora_path = None
 
-    print("🔧 Loading base ChatterboxMultilingualTTS ...")
+    print(f"🔧 Loading base ChatterboxMultilingualTTS ...")
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    model = ChatterboxMultilingualTTS("ResembleAI/chatterbox")
+    model.to(device)
 
-    print("🔧 Injecting LoRA ...")
-    targets = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-    layers = inject_lora(model.t3, targets=targets, rank=32, alpha=64.0, dropout=0.0)
-    load_lora_state(layers, lora_path, device=device)
-    if hasattr(model, 'eval'):
-        model.eval()
-    elif hasattr(model.t3, 'eval'):
+    if not args.skip_lora and lora_path:
+        # Re-inject our custom LoRA weights
+        checkpoint = torch.load(lora_path, map_location=device)
+        layers = []
+        for name, module in model.t3.named_modules():
+            if isinstance(module, nn.Linear):
+                # Standard Chatterbox T3 layers to adapt
+                if any(x in name for x in ["q_proj", "k_proj", "v_proj", "o_proj"]):
+                    parent_name = ".".join(name.split(".")[:-1])
+                    child_name = name.split(".")[-1]
+                    parent = model.t3.get_submodule(parent_name)
+                    
+                    # Create LoRA wrapper
+                    lora_mod = LoRALayer(module, rank=16, alpha=32)
+                    setattr(parent, child_name, lora_mod)
+                    layers.append(name)
+
+        model.load_state_dict(checkpoint, strict=False)
         model.t3.eval()
-    print(f"   LoRA injected into {len(layers)} layers ✓\n")
+        print(f"   LoRA injected into {len(layers)} layers ✓\n")
+    else:
+        model.t3.eval()
+        print("   Base model loaded (no LoRA) ✓\n")
 
     # ------------------------------------------------------------------
     # 3. Load speaker verification model
