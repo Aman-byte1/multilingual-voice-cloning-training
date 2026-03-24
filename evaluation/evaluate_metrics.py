@@ -136,8 +136,8 @@ def main():
     else: lora_path = None
 
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    model = ChatterboxMultilingualTTS("ResembleAI/chatterbox")
-    model.to(device)
+    # FIX: Use .from_pretrained() to automatically load s3gen, ve, and tokenizer
+    model = ChatterboxMultilingualTTS.from_pretrained(device=device)
 
     if not args.skip_lora and lora_path:
         checkpoint = torch.load(lora_path, map_location=device)
