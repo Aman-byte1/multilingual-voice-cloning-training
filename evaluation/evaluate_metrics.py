@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-🚀 HIGH-PERFORMANCE RTX 4090 OPTIMIZED EVALUATION
+🚀 HIGH-PERFORMANCE RTX 4090 OPTIMIZED EVALUATION (v2: Corpus Metrics)
 End-to-end evaluation of the Chatterbox FR LoRA fine-tuned model.
 
-Pipeline (Optimized for Ada/Ampere GPUs):
-  1. Serial AR Generation (Phase 1) - Accelerated via TF32
-  2. Batched Whisper ASR (Phase 2) - Parallel transcription
-  3. Batched COMET (Phase 3) - Neural quality scoring
-  4. Serial Metrics (Phase 4) - PESQ/MCD/Similarity
+Methodology Refresh:
+  1. ASR Engine: Upgrade to Whisper-Large-v3 (Accuracy > Speed)
+  2. Metrics: Implement standard Corpus-Level WER and chrF++
+  3. Precision: Pure FP32 + TF32 acceleration
 """
 
 import os
@@ -107,12 +106,12 @@ def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval") -> str
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Accelerated Chatterbox Evaluation (RTX 4090 Optimized)")
+    parser = argparse.ArgumentParser(description="Accelerated Chatterbox Evaluation (Corpus Metrics v2)")
     parser.add_argument("--dataset", default="amanuelbyte/acl-voice-cloning-fr-expandedtry")
     parser.add_argument("--repo-id", default="amanuelbyte/chatterbox-fr-lora")
     parser.add_argument("--lora-file", default="best_lora_adapter.pt")
     parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for ASR/COMET")
+    parser.add_argument("--batch-size", type=int, default=16, help="Lowered BS for Large-v3 VRAM")
     parser.add_argument("--output-dir", default="./eval_results")
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--skip-lora", action="store_true")
@@ -136,7 +135,6 @@ def main():
     else: lora_path = None
 
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    # FIX: Use .from_pretrained() to automatically load s3gen, ve, and tokenizer
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
 
     if not args.skip_lora and lora_path:
@@ -153,8 +151,8 @@ def main():
         print(f"   LoRA injected ✓\n")
     model.t3.eval()
 
-    # 3. Phase 1: FAST Serial Generation
-    print(f"🎙 PHASE 1/4: Generating {total} audio samples (Serial AR) ...")
+    # 3. Phase 1: Generation
+    print(f"🎙 PHASE 1/4: Generating {total} audio samples (Serial AR with TF32) ...")
     samples_data = [] # Stores paths and metadata
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
@@ -184,10 +182,10 @@ def main():
             "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
         })
 
-    # 4. Phase 2: BATCHED ASR (Whisper)
-    print(f"\n🎙 PHASE 2/4: Transcribing audio in batches of {args.batch_size} (Whisper Medium) ...")
+    # 4. Phase 2: BATCHED ASR (Whisper Large-v3)
+    print(f"\n🎙 PHASE 2/4: Transcribing audio in batches of {args.batch_size} (WHISPER LARGE-V3) ...")
     from transformers import pipeline
-    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-medium", device=device, batch_size=args.batch_size, chunk_length_s=30)
+    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-large-v3", device=device, batch_size=args.batch_size, chunk_length_s=30)
     
     def audio_gen():
         for s in samples_data:
@@ -199,47 +197,75 @@ def main():
         transcripts.append(out["text"])
 
     # 5. Phase 3: BATCHED COMET
-    print(f"\n🌍 PHASE 3/4: Scoring translation quality in batches of {args.batch_size} (COMET) ...")
+    print(f"\n🌍 PHASE 3/4: Scoring translation quality in batches ...")
     comet_model = load_comet_model(device=device)
     comet_data = [{"src": s["text_en"], "mt": tx, "ref": s["text_fr"]} for s, tx in zip(samples_data, transcripts)]
     comet_scores = comet_model.predict(comet_data, batch_size=args.batch_size, gpus=1 if "cuda" in device else 0).scores
 
-    # 6. Phase 4: FINAL METRICS (Acoustic Axes)
-    print(f"\n📊 PHASE 4/4: Calculating acoustic metrics (Similarity, PESQ, MCD) ...")
+    # 6. Phase 4: FINAL METRICS
+    print(f"\n📊 PHASE 4/4: Calculating benchmark results (Corpus-Level) ...")
     verifier = load_speaker_model()
     import jiwer
     import sacrebleu
     
+    # 1. String Matchers (Corpus-level)
+    references = [s["text_fr"] for s in samples_data]
+    
+    # Clean refs/hyps for WER
+    transform = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemovePunctuation(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
+    refs_clean = [transform(r) for r in references]
+    hyps_clean = [transform(t) for t in transcripts]
+    
+    corpus_wer = float(jiwer.wer(refs_clean, hyps_clean))
+    corpus_chrf = float(sacrebleu.corpus_chrf(transcripts, [references]).score)
+    mean_comet = float(np.mean(comet_scores))
+
+    # 2. Acoustic Matchers (Per-sample mean)
+    pesq_list, mcd_list, sim_list = [], [], []
     results = []
-    for s, tx, comet_val in tqdm(zip(samples_data, transcripts, comet_scores), total=len(samples_data), desc="Finalizing"):
+    for i, (s, tx, comet_val) in enumerate(tqdm(zip(samples_data, transcripts, comet_scores), total=len(samples_data), desc="Acoustic Alignment")):
         p = compute_pesq_score(s["gt_path"], s["synth_path"])
         m = compute_mcd_score(s["gt_path"], s["synth_path"])
         sim = float(verifier.verify_files(s["gt_path"], s["synth_path"])[0].item())
         
-        # WER/chrF
-        ref_clean = jiwer.RemovePunctuation()(s["text_fr"].lower())
-        hyp_clean = jiwer.RemovePunctuation()(tx.lower())
-        w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean else 0.0
-        chr_val = float(sacrebleu.sentence_chrf(tx, [s["text_fr"]]).score)
+        if p: pesq_list.append(p)
+        if m: mcd_list.append(m)
+        sim_list.append(sim)
         
         os.remove(s["gt_path"]) # Clean GT temp wav
         
         results.append({
-            "idx": s["idx"], "speaker": s["speaker_id"], "WER": w, "chrF": chr_val, 
-            "COMET": comet_val, "PESQ": p or 0, "MCD": m or 0, "Similarity": sim
+            "idx": s["idx"], "speaker": s["speaker_id"], 
+            "WER_sent": float(jiwer.wer(refs_clean[i], hyps_clean[i])) if refs_clean[i] else 0.0,
+            "COMET_score": comet_val, "PESQ_wb": p or 0, "MCD_plain": m or 0, "Similarity_cos": sim
         })
 
     # Summary Generation
     summary_path = os.path.join(args.output_dir, "eval_summary.json")
-    stats = {k: float(np.mean([r[k] for r in results])) for k in ["WER", "chrF", "COMET", "PESQ", "MCD", "Similarity"]}
-    with open(summary_path, "w") as f: json.dump({"stats": stats, "results": results}, f, indent=2)
+    final_stats = {
+        "corpus_wer": corpus_wer,
+        "corpus_chrf": corpus_chrf,
+        "mean_comet": mean_comet,
+        "mean_pesq": float(np.mean(pesq_list)) if pesq_list else 0.0,
+        "mean_mcd": float(np.mean(mcd_list)) if mcd_list else 0.0,
+        "mean_similarity": float(np.mean(sim_list))
+    }
+    with open(summary_path, "w") as f: json.dump({"stats": final_stats, "results": results}, f, indent=2)
 
-    print("\n" + "="*50)
-    print("  FAST EVALUATION COMPLETE (RTX 4090)")
-    print("="*50)
-    for k, v in stats.items(): print(f"  {k:12}: {v:.4f}")
-    print("="*50)
-    print(f"✅ Results saved to {args.output_dir}")
+    print("\n" + "="*60)
+    print("  DEFINITIVE BENCHMARK RESULTS (Corpus-Scale)")
+    print("="*60)
+    print(f"  ASR Engine:         Whisper Large-v3")
+    print("-" * 60)
+    print(f"  Corpus WER:         {corpus_wer:.4f}  (Lower is better, 0.0-1.0 range)")
+    print(f"  Corpus chrF++:      {corpus_chrf:.4f} (Higher is better, 0-100 range)")
+    print(f"  Mean COMET:         {mean_comet:.4f}  (Higher is better, neural semantic)")
+    print("-" * 60)
+    print(f"  Mean Similarity:    {final_stats['mean_similarity']:.4f} (0.0-1.0 Cosine)")
+    print(f"  Mean PESQ:          {final_stats['mean_pesq']:.4f} (1.0-4.5 Wideband)")
+    print(f"  Mean MCD:           {final_stats['mean_mcd']:.4f} (Lower is better)")
+    print("="*60)
+    print(f"✅ Definitive report done -> {args.output_dir}")
 
 if __name__ == "__main__":
     main()
