@@ -4,8 +4,8 @@ Cross-Lingual Voice Cloning Evaluation Pipeline
 ================================================
 Chatterbox base vs. LoRA fine-tuned model evaluation.
 
-Metrics (10 total):
-  Content:  WER, chrF++, COMET
+Metrics (9 total):
+  Content:  WER, chrF++
   Speaker:  ECAPA Cosine Similarity, EER
   Quality:  PESQ, STOI, MCD, UTMOS
   Prosody:  Pitch Correlation (F0)
@@ -267,22 +267,6 @@ def compute_eer(genuine_scores: List[float],
 
 
 # ===================================================================
-# COMET loader
-# ===================================================================
-
-def load_comet_model(device: str = "cuda"):
-    from comet import download_model, load_from_checkpoint
-    import logging
-    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-    model_path = download_model("Unbabel/wmt22-comet-da")
-    model = load_from_checkpoint(model_path)
-    model.eval()
-    if device == "cuda":
-        model.cuda()
-    return model
-
-
-# ===================================================================
 # Aggregation helpers
 # ===================================================================
 
@@ -314,7 +298,6 @@ def main():
     parser.add_argument("--lora-file",
                         default="best_lora_adapter.pt")
     parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--comet-batch-size", type=int, default=32)
     parser.add_argument("--whisper-model", default="large-v3",
                         help="faster-whisper model size")
     parser.add_argument("--whisper-beam", type=int, default=5)
@@ -477,29 +460,9 @@ def main():
     print(f"   Transcribed: {len(transcripts)} samples")
 
     # ==============================================================
-    # PHASE 5: COMET scoring
+    # PHASE 5: Acoustic metrics + speaker embeddings
     # ==============================================================
-    print(f"\n🌍 Phase 5: COMET semantic scoring "
-          f"(batch={args.comet_batch_size})")
-    comet_model = load_comet_model(device=device)
-    comet_data = [
-        {"src": s["text_en"], "mt": tx, "ref": s["text_fr"]}
-        for s, tx in zip(samples, transcripts)
-    ]
-    comet_output = comet_model.predict(
-        comet_data,
-        batch_size=args.comet_batch_size,
-        gpus=1 if device == "cuda" else 0
-    )
-    comet_scores = comet_output.scores
-
-    del comet_model
-    torch.cuda.empty_cache()
-
-    # ==============================================================
-    # PHASE 6: Acoustic metrics + speaker embeddings
-    # ==============================================================
-    print(f"\n📊 Phase 6: Acoustic metrics & speaker embeddings")
+    print(f"\n📊 Phase 5: Acoustic metrics & speaker embeddings")
 
     verifier = load_speaker_model(device=device)
     utmos_predictor = (None if args.skip_utmos
@@ -521,8 +484,8 @@ def main():
     synth_embeddings = []  # (embedding_tensor, speaker_id)
     gt_embeddings = []     # (embedding_tensor, speaker_id)
 
-    for s, tx, comet_val in tqdm(
-            zip(samples, transcripts, comet_scores),
+    for s, tx in tqdm(
+            zip(samples, transcripts),
             total=len(samples), desc="Computing metrics"):
 
         gt_path = s["gt_path"]
@@ -574,7 +537,6 @@ def main():
             "speaker": spk,
             "WER": w,
             "chrF": chr_val,
-            "COMET": float(comet_val),
             "PESQ": pesq_val,
             "STOI": stoi_val,
             "MCD": mcd_val,
@@ -591,9 +553,9 @@ def main():
     torch.cuda.empty_cache()
 
     # ==============================================================
-    # PHASE 7: EER computation
+    # PHASE 6: EER computation
     # ==============================================================
-    print(f"\n🔐 Phase 7: Computing EER from {len(synth_embeddings)} "
+    print(f"\n🔐 Phase 6: Computing EER from {len(synth_embeddings)} "
           f"embeddings")
 
     genuine_scores = []
@@ -617,11 +579,11 @@ def main():
           else "   EER: could not compute")
 
     # ==============================================================
-    # PHASE 8: Summary & export
+    # PHASE 7: Summary & export
     # ==============================================================
-    print(f"\n📋 Phase 8: Generating summary")
+    print(f"\n📋 Phase 7: Generating summary")
 
-    metric_keys = ["WER", "chrF", "COMET", "Similarity",
+    metric_keys = ["WER", "chrF", "Similarity",
                    "PESQ", "STOI", "MCD", "UTMOS", "PitchCorr"]
 
     # Overall stats
@@ -690,7 +652,7 @@ def main():
 
     # ── Print summary ─────────────────────────────────────────
     direction = {
-        "WER": "↓", "chrF": "↑", "COMET": "↑",
+        "WER": "↓", "chrF": "↑",
         "Similarity": "↑", "PESQ": "↑", "STOI": "↑",
         "MCD": "↓", "UTMOS": "↑", "PitchCorr": "↑",
     }
