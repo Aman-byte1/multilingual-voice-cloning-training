@@ -56,6 +56,7 @@ logging.basicConfig(
 logger = logging.getLogger("ChatterboxLoRA")
 
 SEP = '\u2550' * 50
+STAR = '\u2605'
 
 
 # ============================================================================
@@ -1152,9 +1153,9 @@ class ChatterboxFrTrainer:
                 self.patience_counter = 0
             else:
                 self.patience_counter += 1
-            self.save_checkpoint(self.global_step, vl, is_best)
-            logger.info(f"Epoch {epoch+1} val: {vl:.4f}{' \u2605 best!' if is_best else ''}")
-            self.metrics.plot(os.path.join(self.cfg.output_dir, "training_metrics.png"))
+            star_text = f" {STAR} best!" if is_best else ""
+            logger.info(f"Epoch {epoch+1} val: {vl:.4f}{star_text}"
+                        f" (patience: {self.patience_counter}/{self.cfg.patience})")
 
         self._finish_training()
 
