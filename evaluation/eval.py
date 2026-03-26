@@ -345,20 +345,33 @@ def main():
     if not args.skip_lora:
         lora_path = hf_hub_download(
             repo_id=args.repo_id, filename=args.lora_file)
-        checkpoint = torch.load(lora_path, map_location=device)
+        payload = torch.load(lora_path, map_location=device, weights_only=True)
+        # Read config from self-describing adapter
+        lora_cfg = payload.get("config", {})
+        targets = lora_cfg.get("target_modules", ["q_proj", "v_proj"])
+        rank = lora_cfg.get("rank", 8)
+        alpha = lora_cfg.get("alpha", 16.0)
+        dropout = lora_cfg.get("dropout", 0.1)
         lora_count = 0
         for name, module in model.t3.named_modules():
             if isinstance(module, nn.Linear) and any(
-                    k in name for k in
-                    ["q_proj", "k_proj", "v_proj", "o_proj"]):
+                    k in name for k in targets):
                 parent_name = ".".join(name.split(".")[:-1])
                 child_name = name.split(".")[-1]
                 parent = model.t3.get_submodule(parent_name)
                 setattr(parent, child_name,
-                        LoRALayer(module, rank=16, alpha=32))
+                        LoRALayer(module, rank=rank, alpha=alpha, dropout=dropout))
                 lora_count += 1
-        model.load_state_dict(checkpoint, strict=False)
-        print(f"   LoRA injected: {lora_count} layers ✓")
+        # Load with proper state_dict keys
+        lora_sd = payload.get("lora_state_dict", payload)
+        current_sd = model.t3.state_dict()
+        loaded = 0
+        for key, value in lora_sd.items():
+            if key in current_sd:
+                current_sd[key] = value.to(device)
+                loaded += 1
+        model.t3.load_state_dict(current_sd, strict=False)
+        print(f"   LoRA injected: {lora_count} layers, {loaded} tensors loaded ✓")
 
     model.t3.eval()
     print(f"   Sample rate: {model.sr} Hz")

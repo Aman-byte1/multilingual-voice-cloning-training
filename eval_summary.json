@@ -1,0 +1,52 @@
+{
+  "dataset": "amanuelbyte/acl-voice-cloning-fr-expandedtry",
+  "split": "test",
+  "lora_repo": "amanuelbyte/chatterbox-fr-lora",
+  "lora_file": "best_lora_adapter.pt",
+  "total_test_samples": 500,
+  "evaluated_samples": 500,
+  "metrics": {
+    "PESQ": {
+      "mean": 1.2278640916347503,
+      "std": 0.2559359917570019,
+      "min": 1.0265299081802368,
+      "max": 3.5615851879119873,
+      "count": 500
+    },
+    "MCD": {
+      "mean": 14.480482766056761,
+      "std": 3.2238845104253926,
+      "min": 4.897205452539699,
+      "max": 22.517904607112126,
+      "count": 500
+    },
+    "Speaker_Similarity": {
+      "mean": 0.6928805678337813,
+      "std": 0.14117585891598308,
+      "min": 0.04173790663480759,
+      "max": 0.8895349502563477,
+      "count": 500
+    },
+    "WER": {
+      "mean": 0.23931582353718997,
+      "std": 1.2381093272149004,
+      "min": 0.0,
+      "max": 21.2,
+      "count": 500
+    },
+    "chrF++": {
+      "mean": 89.9724320119296,
+      "std": 12.431225829692716,
+      "min": 11.380714177439962,
+      "max": 100.0,
+      "count": 500
+    },
+    "COMET": {
+      "mean": 0.7827771331071853,
+      "std": 0.15787987194819747,
+      "min": 0.12518996000289917,
+      "max": 0.9794071316719055,
+      "count": 500
+    }
+  }
+}
