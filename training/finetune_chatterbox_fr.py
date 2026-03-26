@@ -420,7 +420,18 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
         trg_file = f"{speaker_id}_{i:06d}.wav"
         trg_path = os.path.join(audio_dir, trg_file)
         wav_t = torch.from_numpy(trg_16k).unsqueeze(0)
-        torchaudio.save(trg_path, wav_t, 16000)
+        
+        # Robustness check: NaN/Inf
+        if torch.isnan(wav_t).any() or torch.isinf(wav_t).any():
+            filter_stats["reasons"]["nan_or_inf"] = filter_stats["reasons"].get("nan_or_inf", 0) + 1
+            continue
+
+        try:
+            torchaudio.save(trg_path, wav_t, 16000)
+        except Exception as e:
+            logger.error(f"Failed to save {trg_path}: {e}")
+            filter_stats["reasons"]["write_error"] = filter_stats["reasons"].get("write_error", 0) + 1
+            continue
 
         # Reference audio
         ref_file = ""
@@ -445,7 +456,15 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
             ref_file = f"ref_{speaker_id}_{i:06d}.wav"
             ref_path = os.path.join(ref_dir, ref_file)
             ref_t = torch.from_numpy(ref_16k).unsqueeze(0)
-            torchaudio.save(ref_path, ref_t, 16000)
+            
+            if not (torch.isnan(ref_t).any() or torch.isinf(ref_t).any()):
+                try:
+                    torchaudio.save(ref_path, ref_t, 16000)
+                except Exception as e:
+                    logger.warning(f"Failed to save reference {ref_path}: {e}")
+                    ref_file = "" # Skip ref but keep target
+            else:
+                ref_file = ""
         else:
             filter_stats["ref_types"]["none"] += 1
 
