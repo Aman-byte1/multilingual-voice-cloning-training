@@ -1120,9 +1120,9 @@ class ChatterboxFrTrainer:
                     else:
                         self.patience_counter += 1
                     self.save_checkpoint(self.global_step, vl, is_best)
+                    star_text = f" {STAR} best!" if is_best else ""
                     logger.info(
-                        f"  Val loss: {vl:.4f}"
-                        f"{' \u2605 best!' if is_best else ''}"
+                        f"  Val loss: {vl:.4f}{star_text}"
                         f" (patience: {self.patience_counter}/{self.cfg.patience})")
                     if self.patience_counter >= self.cfg.patience:
                         logger.info(f"Early stopping at step {self.global_step}")
