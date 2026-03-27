@@ -69,9 +69,9 @@ class TrainingConfig:
     """All hyperparameters and paths for fine-tuning."""
 
     # ── Dataset ──
-    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-expandedtry"
+    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-cleaned"
     dataset_split: str = "train"
-    sample_fraction: float = 1.0  # USE FULL DATASET (was 0.20)
+    sample_fraction: float = 1.0
     cache_dir: str = "./data_cache"
     audio_data_dir: str = "./audio_data"
 
@@ -91,23 +91,23 @@ class TrainingConfig:
 
     # ── Training ──
     output_dir: str = "./chatterbox_fr_finetuned"
-    num_epochs: int = 5  # was 3
+    num_epochs: int = 10       # more passes on smaller clean dataset
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 1e-5
-    min_learning_rate: float = 1e-6
+    learning_rate: float = 3e-5  # higher LR: data is clean, 7.7k samples
+    min_learning_rate: float = 3e-6
     max_grad_norm: float = 1.0
-    warmup_ratio: float = 0.05
+    warmup_ratio: float = 0.03   # less warmup on smaller dataset
     fp16: bool = True
     compile_model: bool = True
     seed: int = 42
     weight_decay: float = 0.01
 
-    # LoRA config
+    # LoRA config — rank 16 for 8-speaker coverage
     use_lora: bool = True
-    lora_rank: int = 8
-    lora_alpha: float = 16.0
-    lora_dropout: float = 0.1
+    lora_rank: int = 16
+    lora_alpha: float = 32.0
+    lora_dropout: float = 0.05   # less dropout: clean data, less regularization
     target_modules: List[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
@@ -116,14 +116,14 @@ class TrainingConfig:
     freeze_ve: bool = True
     freeze_s3gen: bool = True
 
-    # ── Validation / checkpointing (ratios of total steps) ──
+    # ── Validation / checkpointing ──
     val_split_ratio: float = 0.10
     eval_every_ratio: float = 0.10
     save_every_ratio: float = 0.20
     log_every_n_steps: int = 5
     test_every_ratio: float = 0.25
     num_test_samples: int = 3
-    patience: int = 5  # early stopping patience (in eval cycles)
+    patience: int = 8   # more tolerance on smaller dataset
 
     # ── Language ──
     language_id: str = "fr"
