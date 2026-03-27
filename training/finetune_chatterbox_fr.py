@@ -37,6 +37,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchaudio
 import torchaudio.transforms as T
 import numpy as np
+import soundfile as sf
 
 import matplotlib
 matplotlib.use("Agg")
@@ -271,18 +272,14 @@ def merge_lora(model: nn.Module):
 # ============================================================================
 
 def compute_audio_snr(audio: np.ndarray, sr: int, frame_len: float = 0.025) -> float:
-    """Estimate SNR by comparing signal energy to silence energy."""
+    """Estimate SNR — fully vectorized with numpy reshape."""
     frame_samples = int(sr * frame_len)
     n_frames = len(audio) // frame_samples
     if n_frames < 4:
         return 0.0
-    energies = []
-    for i in range(n_frames):
-        frame = audio[i * frame_samples:(i + 1) * frame_samples]
-        energies.append(np.mean(frame ** 2))
-    energies = np.array(energies)
-    if len(energies) == 0:
-        return 0.0
+    # Reshape into (n_frames, frame_samples) and compute energy per frame
+    frames = audio[:n_frames * frame_samples].reshape(n_frames, frame_samples)
+    energies = np.mean(frames ** 2, axis=1)
     sorted_e = np.sort(energies)
     n_noise = max(1, len(sorted_e) // 10)
     noise_power = np.mean(sorted_e[:n_noise])
@@ -293,28 +290,34 @@ def compute_audio_snr(audio: np.ndarray, sr: int, frame_len: float = 0.025) -> f
 
 
 def compute_silence_ratio(audio: np.ndarray, sr: int, threshold_db: float = -40.0) -> float:
-    """Fraction of frames below energy threshold."""
+    """Fraction of frames below energy threshold — vectorized."""
     frame_len = int(sr * 0.025)
     n_frames = len(audio) // frame_len
     if n_frames < 2:
         return 1.0
     threshold_energy = 10 ** (threshold_db / 10)
-    silent = sum(1 for i in range(n_frames)
-                 if np.mean(audio[i*frame_len:(i+1)*frame_len] ** 2) < threshold_energy)
-    return silent / n_frames
+    frames = audio[:n_frames * frame_len].reshape(n_frames, frame_len)
+    energies = np.mean(frames ** 2, axis=1)
+    return float(np.mean(energies < threshold_energy))
 
 
 def trim_trailing_silence(audio: np.ndarray, sr: int, threshold_db: float = -45.0) -> np.ndarray:
-    """Trim silence only from the END of the audio, with safety padding."""
+    """Trim silence from the END of audio — vectorized energy scan."""
     frame_len = int(sr * 0.01)  # 10ms frames
     padding_len = int(sr * 0.2) # 200ms safety padding
     threshold_energy = 10 ** (threshold_db / 10)
-    last_idx = len(audio)
-    for i in range(len(audio) - frame_len, 0, -frame_len):
-        frame = audio[i : i + frame_len]
-        if np.mean(frame**2) > threshold_energy:
-            last_idx = min(len(audio), i + padding_len)
-            break
+    n_frames = len(audio) // frame_len
+    if n_frames < 2:
+        return audio
+    # Vectorized: compute energy of all frames at once
+    frames = audio[:n_frames * frame_len].reshape(n_frames, frame_len)
+    energies = np.mean(frames ** 2, axis=1)
+    # Find last frame above threshold (searching from the end)
+    above = np.where(energies > threshold_energy)[0]
+    if len(above) == 0:
+        return audio
+    last_active_frame = above[-1]
+    last_idx = min(len(audio), (last_active_frame + 1) * frame_len + padding_len)
     if last_idx < sr * 0.5:  # Don't trim to less than 0.5s
         return audio
     return audio[:last_idx]
@@ -417,20 +420,17 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
             filter_stats["reasons"][reason] = filter_stats["reasons"].get(reason, 0) + 1
             continue
 
-        filter_stats["kept"] += 1
-
-        # Save target audio at 16kHz
+        # Save target audio at 16kHz (soundfile is faster than torchaudio for raw numpy)
         trg_file = f"{speaker_id}_{i:06d}.wav"
         trg_path = os.path.join(audio_dir, trg_file)
-        wav_t = torch.from_numpy(trg_16k).unsqueeze(0)
         
-        # Robustness check: NaN/Inf
-        if torch.isnan(wav_t).any() or torch.isinf(wav_t).any():
+        # Robustness check: NaN/Inf (pure numpy, no torch overhead)
+        if np.any(np.isnan(trg_16k)) or np.any(np.isinf(trg_16k)):
             filter_stats["reasons"]["nan_or_inf"] = filter_stats["reasons"].get("nan_or_inf", 0) + 1
             continue
 
         try:
-            torchaudio.save(trg_path, wav_t, 16000)
+            sf.write(trg_path, trg_16k, 16000)
         except Exception as e:
             logger.error(f"Failed to save {trg_path}: {e}")
             filter_stats["reasons"]["write_error"] = filter_stats["reasons"].get("write_error", 0) + 1
@@ -458,14 +458,13 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
             ref_16k = ref_16k[:max_ref]
             ref_file = f"ref_{speaker_id}_{i:06d}.wav"
             ref_path = os.path.join(ref_dir, ref_file)
-            ref_t = torch.from_numpy(ref_16k).unsqueeze(0)
             
-            if not (torch.isnan(ref_t).any() or torch.isinf(ref_t).any()):
+            if not (np.any(np.isnan(ref_16k)) or np.any(np.isinf(ref_16k))):
                 try:
-                    torchaudio.save(ref_path, ref_t, 16000)
+                    sf.write(ref_path, ref_16k, 16000)
                 except Exception as e:
                     logger.warning(f"Failed to save reference {ref_path}: {e}")
-                    ref_file = "" # Skip ref but keep target
+                    ref_file = ""
             else:
                 ref_file = ""
         else:
@@ -480,7 +479,7 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
             "language_id": config.language_id,
         })
 
-        if i % 500 == 0:
+        if i % 5000 == 0:
             gc.collect()
 
     # Write metadata.csv
