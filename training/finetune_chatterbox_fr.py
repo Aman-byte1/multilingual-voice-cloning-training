@@ -98,7 +98,9 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     warmup_ratio: float = 0.05
     fp16: bool = True
+    compile_model: bool = True
     seed: int = 42
+    weight_decay: float = 0.01
 
     # LoRA config
     use_lora: bool = True
@@ -131,6 +133,7 @@ class TrainingConfig:
     hf_username: str = "amanuelbyte"
     hf_repo_name: str = "chatterbox-fr-lora"
     hf_repo_id: Optional[str] = None # Auto-generated if None
+    skip_dataset_upload: bool = False
 
     def __post_init__(self):
         for d in [
@@ -732,6 +735,10 @@ class ChatterboxFrTrainer:
         random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+            # RTX 4090 optimizations: enable TF32 for ~2x matmul speedup
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
 
     # ---- Model ----
 
@@ -770,6 +777,14 @@ class ChatterboxFrTrainer:
         all_train = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         logger.info(f"Full model: {all_total:,} total, {all_train:,} trainable ({100*all_train/all_total:.3f}%)")
 
+        # torch.compile for kernel fusion (RTX 4090 Ampere+)
+        if self.cfg.compile_model and hasattr(torch, 'compile'):
+            try:
+                self.model.t3 = torch.compile(self.model.t3, mode="reduce-overhead")
+                logger.info("torch.compile applied to T3 (reduce-overhead mode)")
+            except Exception as e:
+                logger.warning(f"torch.compile failed (non-fatal): {e}")
+
     # ---- Data ----
 
     def prepare_data(self):
@@ -787,13 +802,15 @@ class ChatterboxFrTrainer:
             batch_size=self.cfg.batch_size, shuffle=True,
             num_workers=4, collate_fn=collate_fn,
             pin_memory=True, drop_last=True, prefetch_factor=3,
+            persistent_workers=True,
         )
         self.val_loader = DataLoader(
             ChatterboxFrDataset(
                 self.val_meta, self.cfg.audio_data_dir,
                 self.cfg.max_audio_duration_sec),
-            batch_size=1, shuffle=False,
+            batch_size=4, shuffle=False,
             num_workers=2, collate_fn=collate_fn,
+            persistent_workers=True,
         )
 
         # Compute step counts and ratio-based intervals
@@ -1056,6 +1073,10 @@ class ChatterboxFrTrainer:
         accum_count = 0
         step_t0 = time.time()
 
+        # Cache LoRA params list to avoid re-walking the module tree every step
+        cached_lora_params = get_lora_params(self.model.t3)
+        logger.info(f"Cached {len(cached_lora_params)} LoRA parameter tensors")
+
         for epoch in range(self.cfg.num_epochs):
             logger.info(f"\n{SEP}  Epoch {epoch+1}/{self.cfg.num_epochs}  {SEP}")
             epoch_losses = []
@@ -1097,8 +1118,7 @@ class ChatterboxFrTrainer:
                     continue
 
                 self.scaler.unscale_(self.optimizer)
-                params = get_lora_params(self.model.t3)
-                gn = torch.nn.utils.clip_grad_norm_(params, self.cfg.max_grad_norm)
+                gn = torch.nn.utils.clip_grad_norm_(cached_lora_params, self.cfg.max_grad_norm)
 
                 lr = cosine_lr(self.global_step, self.warmup_steps,
                                self.total_steps, self.cfg.learning_rate,
@@ -1108,7 +1128,7 @@ class ChatterboxFrTrainer:
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
 
                 avg_loss = accum_loss / accum_count
                 dt = time.time() - step_t0
@@ -1255,15 +1275,18 @@ model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
             )
             
             # Upload training dataset for reproducibility
-            data_dir = self.cfg.audio_data_dir
-            if os.path.exists(data_dir):
-                logger.info(f"  Uploading training dataset (audio_data) ...")
-                api.upload_folder(
-                    folder_path=data_dir,
-                    path_in_repo="training_dataset",
-                    repo_id=repo_id,
-                    repo_type="model",
-                )
+            if not self.cfg.skip_dataset_upload:
+                data_dir = self.cfg.audio_data_dir
+                if os.path.exists(data_dir):
+                    logger.info(f"  Uploading training dataset (audio_data) ...")
+                    api.upload_folder(
+                        folder_path=data_dir,
+                        path_in_repo="training_dataset",
+                        repo_id=repo_id,
+                        repo_type="model",
+                    )
+            else:
+                logger.info("  Skipping dataset upload (already on HF)")
             
             # Create README
             api.upload_file(
@@ -1372,6 +1395,8 @@ def parse_args():
     p.add_argument("--resume", type=str, default=None)
     p.add_argument("--hf-token", type=str, default=None,
                    help="HuggingFace token for uploading model after training")
+    p.add_argument("--skip-dataset-upload", action="store_true",
+                   help="Skip uploading the 60GB dataset if already on HF")
     # Inference
     p.add_argument("--text", type=str, default=None)
     p.add_argument("--ref-audio", type=str, default=None)
@@ -1393,6 +1418,7 @@ def main():
     config.use_lora = args.use_lora
     config.fp16 = args.fp16
     if args.hf_token is not None: config.hf_token = args.hf_token
+    config.skip_dataset_upload = args.skip_dataset_upload
 
     if args.mode == "prepare-only":
         prepare_dataset(config)
