@@ -772,8 +772,8 @@ class ChatterboxFrTrainer:
         total = sum(p.numel() for p in self.model.t3.parameters())
         trainable = sum(p.numel() for p in self.model.t3.parameters() if p.requires_grad)
         logger.info(f"T3: {total:,} total, {trainable:,} trainable ({100*trainable/total:.2f}%)")
-        all_total = sum(p.numel() for p in self.model.parameters())
-        all_train = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        all_total = sum(p.numel() for m in [self.model.t3, self.model.ve, self.model.s3gen] for p in m.parameters())
+        all_train = sum(p.numel() for m in [self.model.t3, self.model.ve, self.model.s3gen] for p in m.parameters() if p.requires_grad)
         logger.info(f"Full model: {all_total:,} total, {all_train:,} trainable ({100*all_train/all_total:.3f}%)")
 
         # torch.compile for kernel fusion (RTX 4090 Ampere+)
