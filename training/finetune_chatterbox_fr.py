@@ -99,7 +99,7 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     warmup_ratio: float = 0.03   # less warmup on smaller dataset
     fp16: bool = True
-    compile_model: bool = True
+    compile_model: bool = False  # disabled: CUDA graph bug on torch 2.4.x
     seed: int = 42
     weight_decay: float = 0.01
 
