@@ -123,7 +123,7 @@ def main():
 
     # 1. Loading data
     print(f"📥 Loading TEST split from {args.dataset} ...")
-    ds_test = load_dataset(args.dataset, data_files={"test": "data/test-*.parquet"}, split="test", cache_dir=args.cache_dir)
+    ds_test = load_dataset(args.dataset, split="test", cache_dir=args.cache_dir)
     total = len(ds_test)
     if args.max_samples and args.max_samples < total:
         indices = list(range(0, total, total // args.max_samples))[:args.max_samples]
@@ -132,7 +132,10 @@ def main():
 
     # 2. Loading model
     if not args.skip_lora:
-        lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
+        if os.path.isfile(args.lora_file):
+            lora_path = args.lora_file
+        else:
+            lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
     else: lora_path = None
 
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
