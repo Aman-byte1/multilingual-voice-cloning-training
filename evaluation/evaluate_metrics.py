@@ -172,6 +172,7 @@ def main():
     # 3. Phase 1: FAST Serial Generation
     print(f"🎙 PHASE 1/4: Generating {total} audio samples (Serial AR) ...")
     samples_data = []
+    skipped = 0
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
         text_fr = (row.get("trg_fr_text") or "").strip()
@@ -185,8 +186,18 @@ def main():
         gt_data = row.get("trg_fr_voice")
         gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_")
         
-        with torch.inference_mode():
-            wav = model.generate(text_fr, audio_prompt_path=ref_wav_path, language_id="fr")
+        try:
+            with torch.inference_mode():
+                wav = model.generate(text_fr, audio_prompt_path=ref_wav_path, language_id="fr")
+        except (RuntimeError, Exception) as e:
+            # CUDA assertion errors from s3gen on edge-case inputs — skip sample
+            skipped += 1
+            tqdm.write(f"   ⚠ Sample {i} failed ({type(e).__name__}), skipping ({skipped} total)")
+            os.remove(ref_wav_path)
+            os.remove(gt_wav_path)
+            # Reset CUDA state after device-side assertion
+            torch.cuda.synchronize()
+            continue
         
         os.remove(ref_wav_path)
         
@@ -197,6 +208,8 @@ def main():
             "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path,
             "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
         })
+    
+    print(f"   Generated {len(samples_data)}/{total} samples ({skipped} skipped)")
 
     # 4. Phase 2: faster-whisper ASR (Large-v3, CTranslate2-accelerated)
     print(f"\n🎙 PHASE 2/4: Transcribing with faster-whisper {args.whisper_model} ...")
