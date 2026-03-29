@@ -5,8 +5,8 @@ End-to-end evaluation of the Chatterbox FR LoRA fine-tuned model.
 
 Pipeline (Optimized for Ada/Ampere GPUs):
   1. Serial AR Generation (Phase 1) - Accelerated via TF32
-  2. Batched Whisper ASR (Phase 2) - Parallel transcription
-  3. Batched COMET (Phase 3) - Neural quality scoring
+  2. Batched faster-whisper ASR (Phase 2) - Large-v3, CTranslate2
+  3. Optional COMET (Phase 3) - Neural quality scoring
   4. Serial Metrics (Phase 4) - PESQ/MCD/Similarity
 """
 
@@ -85,14 +85,18 @@ def load_speaker_model():
     return SpeakerRecognition.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", run_opts={"device": device})
 
 def load_comet_model(device="cuda"):
-    from comet import download_model, load_from_checkpoint
-    import logging
-    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-    model_path = download_model("Unbabel/wmt22-comet-da")
-    model = load_from_checkpoint(model_path)
-    model.eval()
-    if device == "cuda": model.cuda()
-    return model
+    try:
+        from comet import download_model, load_from_checkpoint
+        import logging
+        logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+        model_path = download_model("Unbabel/wmt22-comet-da")
+        model = load_from_checkpoint(model_path)
+        model.eval()
+        if device == "cuda": model.cuda()
+        return model
+    except ImportError:
+        print("   ⚠ COMET not installed — skipping translation quality scoring")
+        return None
 
 def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval") -> str:
     fd, path = tempfile.mkstemp(suffix=".wav", prefix=prefix)
@@ -108,14 +112,15 @@ def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval") -> str
 
 def main():
     parser = argparse.ArgumentParser(description="Accelerated Chatterbox Evaluation (RTX 4090 Optimized)")
-    parser.add_argument("--dataset", default="amanuelbyte/acl-voice-cloning-fr-expandedtry")
-    parser.add_argument("--repo-id", default="amanuelbyte/chatterbox-fr-lora")
+    parser.add_argument("--dataset", default="amanuelbyte/acl-voice-cloning-fr-cleaned")
+    parser.add_argument("--repo-id", default="amanuelbyte/chatterbox-fr-lora-v2")
     parser.add_argument("--lora-file", default="best_lora_adapter.pt")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for ASR/COMET")
     parser.add_argument("--output-dir", default="./eval_results")
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--skip-lora", action="store_true")
+    parser.add_argument("--whisper-model", default="large-v3", help="faster-whisper model size")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -139,12 +144,10 @@ def main():
     else: lora_path = None
 
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    # FIX: Use .from_pretrained() to automatically load s3gen, ve, and tokenizer
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
 
     if not args.skip_lora and lora_path:
         payload = torch.load(lora_path, map_location=device, weights_only=True)
-        # Read config from self-describing adapter
         lora_cfg = payload.get("config", {})
         targets = lora_cfg.get("target_modules", ["q_proj", "v_proj"])
         rank = lora_cfg.get("rank", 8)
@@ -155,7 +158,6 @@ def main():
                 parent_name, child_name = ".".join(name.split(".")[:-1]), name.split(".")[-1]
                 parent = model.t3.get_submodule(parent_name)
                 setattr(parent, child_name, LoRALayer(module, rank=rank, alpha=alpha, dropout=dropout))
-        # Load with proper state_dict keys
         lora_sd = payload.get("lora_state_dict", payload)
         current_sd = model.t3.state_dict()
         loaded = 0
@@ -169,26 +171,24 @@ def main():
 
     # 3. Phase 1: FAST Serial Generation
     print(f"🎙 PHASE 1/4: Generating {total} audio samples (Serial AR) ...")
-    samples_data = [] # Stores paths and metadata
+    samples_data = []
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
         text_fr = (row.get("trg_fr_text") or "").strip()
         text_en = (row.get("ref_en_text") or "").strip()
         
-        # Audio Prompts
         ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice")
         if not ref_data or not text_fr: continue
         
         ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
         
-        # Ground Truth
         gt_data = row.get("trg_fr_voice")
         gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_")
         
         with torch.inference_mode():
             wav = model.generate(text_fr, audio_prompt_path=ref_wav_path, language_id="fr")
         
-        os.remove(ref_wav_path) # Clean prompt immediately
+        os.remove(ref_wav_path)
         
         synth_wav_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
         torchaudio.save(synth_wav_path, wav.cpu() if wav.dim() > 1 else wav.unsqueeze(0).cpu(), model.sr)
@@ -198,25 +198,31 @@ def main():
             "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
         })
 
-    # 4. Phase 2: BATCHED ASR (Whisper)
-    print(f"\n🎙 PHASE 2/4: Transcribing audio in batches of {args.batch_size} (Whisper Medium) ...")
-    from transformers import pipeline
-    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-medium", device=device, batch_size=args.batch_size, chunk_length_s=30)
+    # 4. Phase 2: faster-whisper ASR (Large-v3, CTranslate2-accelerated)
+    print(f"\n🎙 PHASE 2/4: Transcribing with faster-whisper {args.whisper_model} ...")
+    from faster_whisper import WhisperModel
+    whisper = WhisperModel(args.whisper_model, device="cuda", compute_type="float16")
     
-    def audio_gen():
-        for s in samples_data:
-            audio, _ = librosa.load(s["synth_path"], sr=16000)
-            yield audio
-
     transcripts = []
-    for out in tqdm(asr_pipe(audio_gen(), generate_kwargs={"language": "french"}), total=len(samples_data), desc="Transcribing"):
-        transcripts.append(out["text"])
+    for s in tqdm(samples_data, desc="Transcribing"):
+        segments, _ = whisper.transcribe(s["synth_path"], language="fr", beam_size=5)
+        text = " ".join(seg.text.strip() for seg in segments)
+        transcripts.append(text)
+    
+    # Free whisper GPU memory before next phase
+    del whisper
+    torch.cuda.empty_cache()
 
-    # 5. Phase 3: BATCHED COMET
-    print(f"\n🌍 PHASE 3/4: Scoring translation quality in batches of {args.batch_size} (COMET) ...")
+    # 5. Phase 3: COMET (optional — skip if not installed)
+    print(f"\n🌍 PHASE 3/4: Scoring translation quality (COMET) ...")
     comet_model = load_comet_model(device=device)
-    comet_data = [{"src": s["text_en"], "mt": tx, "ref": s["text_fr"]} for s, tx in zip(samples_data, transcripts)]
-    comet_scores = comet_model.predict(comet_data, batch_size=args.batch_size, gpus=1 if "cuda" in device else 0).scores
+    if comet_model is not None:
+        comet_data = [{"src": s["text_en"], "mt": tx, "ref": s["text_fr"]} for s, tx in zip(samples_data, transcripts)]
+        comet_scores = comet_model.predict(comet_data, batch_size=args.batch_size, gpus=1 if "cuda" in device else 0).scores
+        del comet_model
+        torch.cuda.empty_cache()
+    else:
+        comet_scores = [0.0] * len(samples_data)
 
     # 6. Phase 4: FINAL METRICS (Acoustic Axes)
     print(f"\n📊 PHASE 4/4: Calculating acoustic metrics (Similarity, PESQ, MCD) ...")
@@ -236,7 +242,7 @@ def main():
         w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean else 0.0
         chr_val = float(sacrebleu.sentence_chrf(tx, [s["text_fr"]]).score)
         
-        os.remove(s["gt_path"]) # Clean GT temp wav
+        os.remove(s["gt_path"])
         
         results.append({
             "idx": s["idx"], "speaker": s["speaker_id"], "WER": w, "chrF": chr_val, 
@@ -245,7 +251,10 @@ def main():
 
     # Summary Generation
     summary_path = os.path.join(args.output_dir, "eval_summary.json")
-    stats = {k: float(np.mean([r[k] for r in results])) for k in ["WER", "chrF", "COMET", "PESQ", "MCD", "Similarity"]}
+    metric_keys = ["WER", "chrF", "PESQ", "MCD", "Similarity"]
+    if comet_model is not None:
+        metric_keys.append("COMET")
+    stats = {k: float(np.mean([r[k] for r in results])) for k in metric_keys}
     with open(summary_path, "w") as f: json.dump({"stats": stats, "results": results}, f, indent=2)
 
     print("\n" + "="*50)
