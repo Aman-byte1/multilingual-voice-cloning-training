@@ -24,14 +24,14 @@ log = logging.getLogger("GPUFilter")
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 SRC_DATASET  = "amanuelbyte/acl-voice-cloning-fr-expandedtry"
-DST_DATASET  = "amanuelbyte/acl-voice-cloning-fr-cleaned"
+DST_DATASET  = "amanuelbyte/acl-voice-cloning-fr-cleaned-v2"
 HF_TOKEN     = os.environ.get("HF_TOKEN", "")
 
-# Filter thresholds
+# Filter thresholds — loosened for more data volume
 MIN_DUR_SEC  = 1.0
 MAX_DUR_SEC  = 20.0
-MIN_SNR_DB   = 15.0
-MAX_SILENCE  = 0.50
+MIN_SNR_DB   = 10.0    # was 15.0 — include moderately noisy audio
+MAX_SILENCE  = 0.65    # was 0.50 — allow more pauses
 MIN_TEXT_LEN = 5
 MAX_TEXT_LEN = 500
 

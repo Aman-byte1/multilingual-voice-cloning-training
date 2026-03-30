@@ -69,7 +69,7 @@ class TrainingConfig:
     """All hyperparameters and paths for fine-tuning."""
 
     # ── Dataset ──
-    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-cleaned"
+    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-cleaned-v2"
     dataset_split: str = "train"
     sample_fraction: float = 1.0
     cache_dir: str = "./data_cache"
@@ -91,23 +91,23 @@ class TrainingConfig:
 
     # ── Training ──
     output_dir: str = "./chatterbox_fr_finetuned"
-    num_epochs: int = 10       # more passes on smaller clean dataset
+    num_epochs: int = 3        # fewer epochs to prevent overfitting
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 3e-5  # higher LR: data is clean, 7.7k samples
-    min_learning_rate: float = 3e-6
+    learning_rate: float = 1e-5   # conservative LR
+    min_learning_rate: float = 1e-6
     max_grad_norm: float = 1.0
-    warmup_ratio: float = 0.03   # less warmup on smaller dataset
+    warmup_ratio: float = 0.05
     fp16: bool = True
     compile_model: bool = False  # disabled: CUDA graph bug on torch 2.4.x
     seed: int = 42
     weight_decay: float = 0.01
 
-    # LoRA config — rank 16 for 8-speaker coverage
+    # LoRA config — rank 8 to reduce overfitting
     use_lora: bool = True
-    lora_rank: int = 16
-    lora_alpha: float = 32.0
-    lora_dropout: float = 0.05   # less dropout: clean data, less regularization
+    lora_rank: int = 8
+    lora_alpha: float = 16.0
+    lora_dropout: float = 0.1    # higher dropout for regularization
     target_modules: List[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
@@ -123,7 +123,7 @@ class TrainingConfig:
     log_every_n_steps: int = 5
     test_every_ratio: float = 0.25
     num_test_samples: int = 3
-    patience: int = 8   # more tolerance on smaller dataset
+    patience: int = 5   # tighter early stopping
 
     # ── Language ──
     language_id: str = "fr"
