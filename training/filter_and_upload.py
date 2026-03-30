@@ -123,8 +123,9 @@ def filter_batch_gpu(batch: dict) -> dict:
         arr = np.asarray(audio_field["array"], dtype=np.float32)
         sr  = audio_field["sampling_rate"]
         if sr != 16000:
-            t = torch.from_numpy(arr).unsqueeze(0)
-            arr = TaT.Resample(sr, 16000)(t).squeeze(0).numpy()
+            # Resample on GPU for speed
+            t = torch.from_numpy(arr).to(DEVICE).unsqueeze(0)
+            arr = TaT.Resample(sr, 16000).to(DEVICE)(t).squeeze(0).cpu().numpy()
         durations.append(len(arr) / 16000)
         # Truncate to max duration
         arr = arr[:max_samples]
