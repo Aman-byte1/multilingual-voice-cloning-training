@@ -135,6 +135,7 @@ class TrainingConfig:
     hf_repo_name: str = "chatterbox-fr-lora"
     hf_repo_id: Optional[str] = None # Auto-generated if None
     skip_dataset_upload: bool = False
+    skip_filter: bool = False  # skip quality filtering for pre-cleaned datasets
 
     def __post_init__(self):
         for d in [
@@ -411,14 +412,14 @@ def prepare_dataset(config: TrainingConfig) -> List[Dict]:
         sr = trg["sampling_rate"]
         trg_16k = resample_to_16k(trg_array, sr)
 
-        # Trim trailing silence
-        trg_16k = trim_trailing_silence(trg_16k, 16000)
-
-        # Quality filter
-        keep, reason = filter_sample(trg_16k, 16000, text, config)
-        if not keep:
-            filter_stats["reasons"][reason] = filter_stats["reasons"].get(reason, 0) + 1
-            continue
+        if not config.skip_filter:
+            # Trim trailing silence
+            trg_16k = trim_trailing_silence(trg_16k, 16000)
+            # Quality filter
+            keep, reason = filter_sample(trg_16k, 16000, text, config)
+            if not keep:
+                filter_stats["reasons"][reason] = filter_stats["reasons"].get(reason, 0) + 1
+                continue
 
         # Save target audio at 16kHz (soundfile is faster than torchaudio for raw numpy)
         trg_file = f"{speaker_id}_{i:06d}.wav"
@@ -1396,6 +1397,8 @@ def parse_args():
                    help="HuggingFace token for uploading model after training")
     p.add_argument("--skip-dataset-upload", action="store_true",
                    help="Skip uploading the 60GB dataset if already on HF")
+    p.add_argument("--skip-filter", action="store_true",
+                   help="Skip quality filtering (for pre-cleaned datasets)")
     # Inference
     p.add_argument("--text", type=str, default=None)
     p.add_argument("--ref-audio", type=str, default=None)
@@ -1418,6 +1421,7 @@ def main():
     config.fp16 = args.fp16
     if args.hf_token is not None: config.hf_token = args.hf_token
     config.skip_dataset_upload = args.skip_dataset_upload
+    config.skip_filter = args.skip_filter
 
     if args.mode == "prepare-only":
         prepare_dataset(config)
