@@ -103,11 +103,11 @@ class TrainingConfig:
     seed: int = 42
     weight_decay: float = 0.0   # Disabled by default
 
-    # LoRA config — rank 16 for better identity capture
+    # LoRA config — rank 32 for a safe balance of capacity and speed
     use_lora: bool = True
-    lora_rank: int = 16
-    lora_alpha: float = 32.0
-    lora_dropout: float = 0.1    # higher dropout for regularization
+    lora_rank: int = 32
+    lora_alpha: float = 64.0
+    lora_dropout: float = 0.05    # lower dropout to avoid losing signal
     target_modules: List[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )

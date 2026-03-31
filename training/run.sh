@@ -47,7 +47,7 @@ if [ "$TRAIN_ONLY" = false ] && [ "$TEST_ONLY" = false ]; then
 
     # Install dependencies
     echo "  Installing dependencies …"
-    pip install -r requirements.txt
+    pip install -r training/requirements.txt
 
     echo "  Environment ready ✓"
 else
