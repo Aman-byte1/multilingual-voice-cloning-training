@@ -69,7 +69,7 @@ class TrainingConfig:
     """All hyperparameters and paths for fine-tuning."""
 
     # ── Dataset ──
-    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-cleaned-v2"
+    dataset_name: str = "amanuelbyte/acl-voice-cloning-fr-sparse-v1"
     dataset_split: str = "train"
     sample_fraction: float = 1.0
     cache_dir: str = "./data_cache"
@@ -97,19 +97,19 @@ class TrainingConfig:
     learning_rate: float = 1e-5   # conservative LR
     min_learning_rate: float = 1e-6
     max_grad_norm: float = 1.0
-    warmup_ratio: float = 0.05
+    warmup_ratio: float = 0.0   # Disabled by default per project recommendation
     fp16: bool = True
     compile_model: bool = False  # disabled: CUDA graph bug on torch 2.4.x
     seed: int = 42
-    weight_decay: float = 0.01
+    weight_decay: float = 0.0   # Disabled by default
 
-    # LoRA config — rank 8 to reduce overfitting
+    # LoRA config — rank 16 for better identity capture
     use_lora: bool = True
-    lora_rank: int = 8
-    lora_alpha: float = 16.0
+    lora_rank: int = 16
+    lora_alpha: float = 32.0
     lora_dropout: float = 0.1    # higher dropout for regularization
     target_modules: List[str] = field(
-        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
     # ── Freezing ──
@@ -1399,6 +1399,8 @@ def parse_args():
                    help="Skip uploading the 60GB dataset if already on HF")
     p.add_argument("--skip-filter", action="store_true",
                    help="Skip quality filtering (for pre-cleaned datasets)")
+    p.add_argument("--warmup-ratio", type=float, default=None)
+    p.add_argument("--weight-decay", type=float, default=None)
     # Inference
     p.add_argument("--text", type=str, default=None)
     p.add_argument("--ref-audio", type=str, default=None)
@@ -1422,6 +1424,8 @@ def main():
     if args.hf_token is not None: config.hf_token = args.hf_token
     config.skip_dataset_upload = args.skip_dataset_upload
     config.skip_filter = args.skip_filter
+    if args.warmup_ratio is not None: config.warmup_ratio = args.warmup_ratio
+    if args.weight_decay is not None: config.weight_decay = args.weight_decay
 
     if args.mode == "prepare-only":
         prepare_dataset(config)
