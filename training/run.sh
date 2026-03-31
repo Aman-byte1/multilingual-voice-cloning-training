@@ -70,20 +70,20 @@ if [ "$TEST_ONLY" = false ]; then
         python training/create_sparse_dataset.py
         
         echo "  Preparing local training directory ..."
-        python finetune_chatterbox_fr.py --mode prepare-only --skip-filter
+        python training/finetune_chatterbox_fr.py --mode prepare-only --skip-filter
     fi
 
     # ---- Step 3: Training ----
     echo ""
-    echo ">>> Step 3: Training with Optimized LoRA (Rank 16, All Modules) …"
+    echo ">>> Step 3: Training with Optimized LoRA (Rank 32, All Modules) …"
     echo "  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 
-    # Fast Sparse Training: ~1500 steps total (3 epochs * 500 steps)
-    python finetune_chatterbox_fr.py \
+    # Fast Sparse Training: ~1500-2000 steps total (3 epochs)
+    python training/finetune_chatterbox_fr.py \
         --mode train \
         --output-dir "$OUTPUT_DIR" \
         --use-lora \
-        --lora-rank 16 \
+        --lora-rank 32 \
         --batch-size 8 \
         --epochs 3 \
         --lr 1e-5 \
@@ -96,7 +96,7 @@ if [ "$TEST_ONLY" = false ]; then
     echo ""
     echo ">>> Step 4: Converting merged model to safetensors …"
     if [ -d "$OUTPUT_DIR/merged_model" ]; then
-        python fix_merged_model.py --model-dir "$OUTPUT_DIR/merged_model"
+        python training/fix_merged_model.py --model-dir "$OUTPUT_DIR/merged_model"
     else
         echo "  Skipping merge (no merged_model found)."
     fi
@@ -107,7 +107,7 @@ echo ""
 echo ">>> Step 5: Testing fine-tuned model …"
 
 if [ -n "$REF_AUDIO" ] && [ -f "$REF_AUDIO" ]; then
-    python test_finetuned.py \
+    python training/test_finetuned.py \
         --model-dir "$OUTPUT_DIR" \
         --ref-audio "$REF_AUDIO" \
         --output-dir ./test_outputs \
@@ -116,7 +116,7 @@ if [ -n "$REF_AUDIO" ] && [ -f "$REF_AUDIO" ]; then
 else
     echo "  Skipping inference test (no REF_AUDIO set)."
     echo "  To test, run:"
-    echo "    python test_finetuned.py --model-dir $OUTPUT_DIR --ref-audio YOUR_FILE.wav"
+    echo "    python training/test_finetuned.py --model-dir $OUTPUT_DIR --ref-audio YOUR_FILE.wav"
 fi
 
 echo ""
