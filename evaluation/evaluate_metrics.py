@@ -175,16 +175,25 @@ def main():
     skipped = 0
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
-        text_fr = (row.get("trg_fr_text") or "").strip()
-        text_en = (row.get("ref_en_text") or "").strip()
         
-        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice")
-        if not ref_data or not text_fr: continue
+        # Support multiple dataset schemas
+        text_fr = (row.get("trg_fr_text") or row.get("text_fr") or "").strip()
+        text_en = (row.get("ref_en_text") or row.get("text_en") or "").strip()
+        
+        ref_data = row.get("ref_en_voice") or row.get("audio_en") or row.get("ref_fr_voice")
+        gt_data = row.get("trg_fr_voice") or row.get("cloned_audio_fr")
+        
+        if not ref_data or not text_fr: 
+            skipped += 1
+            continue
         
         ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
         
-        gt_data = row.get("trg_fr_voice")
-        gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_")
+        # Ground truth for metrics (Similarity/PESQ/MCD)
+        if gt_data:
+            gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_")
+        else:
+            gt_wav_path = None
         
         try:
             with torch.inference_mode():
@@ -245,17 +254,19 @@ def main():
     
     results = []
     for s, tx, comet_val in tqdm(zip(samples_data, transcripts, comet_scores), total=len(samples_data), desc="Finalizing"):
-        p = compute_pesq_score(s["gt_path"], s["synth_path"])
-        m = compute_mcd_score(s["gt_path"], s["synth_path"])
-        sim = float(verifier.verify_files(s["gt_path"], s["synth_path"])[0].item())
-        
+        if s.get("gt_path"):
+            p = compute_pesq_score(s["gt_path"], s["synth_path"])
+            m = compute_mcd_score(s["gt_path"], s["synth_path"])
+            sim = float(verifier.verify_files(s["gt_path"], s["synth_path"])[0].item())
+            os.remove(s["gt_path"])
+        else:
+            p, m, sim = None, None, None
+            
         # WER/chrF
         ref_clean = jiwer.RemovePunctuation()(s["text_fr"].lower())
         hyp_clean = jiwer.RemovePunctuation()(tx.lower())
         w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean else 0.0
         chr_val = float(sacrebleu.sentence_chrf(tx, [s["text_fr"]]).score)
-        
-        os.remove(s["gt_path"])
         
         results.append({
             "idx": s["idx"], "speaker": s["speaker_id"], "WER": w, "chrF": chr_val, 
