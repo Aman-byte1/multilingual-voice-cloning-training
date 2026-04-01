@@ -78,12 +78,12 @@ if [ "$TEST_ONLY" = false ]; then
     echo ">>> Step 3: Training with Optimized LoRA (Rank 32, All Modules) …"
     echo "  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 
-    # Dense Sparse Training: ~7500 steps total (3 epochs * 2500 segments / batch 8)
+    # Fast Sparse Training: ~1500-2000 steps total (3 epochs)
     python training/finetune_chatterbox_fr.py \
         --mode train \
         --output-dir "$OUTPUT_DIR" \
         --use-lora \
-        --lora-rank 64 \
+        --lora-rank 32 \
         --batch-size 8 \
         --epochs 3 \
         --lr 1e-5 \

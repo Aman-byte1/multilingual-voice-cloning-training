@@ -103,10 +103,10 @@ class TrainingConfig:
     seed: int = 42
     weight_decay: float = 0.0   # Disabled by default
 
-    # LoRA config — rank 64 for maximum identity preservation
+    # LoRA config — rank 32 for optimal balance (Rank 64 caused overfitting/degradation)
     use_lora: bool = True
-    lora_rank: int = 64
-    lora_alpha: float = 128.0
+    lora_rank: int = 32
+    lora_alpha: float = 64.0
     lora_dropout: float = 0.05
     target_modules: List[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]

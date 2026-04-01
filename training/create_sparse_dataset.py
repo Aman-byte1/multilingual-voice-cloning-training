@@ -23,7 +23,7 @@ TOKEN     = os.environ.get("HF_TOKEN", "")
 SRC       = "amanuelbyte/acl-voice-cloning-fr-data"
 DST       = "amanuelbyte/acl-voice-cloning-fr-sparse-v1"
 WORK      = "/tmp/vc_sparse_shards"
-REFS_PER_TARGET = 10 # 10 refs * ~740 source rows = ~7500 training rows
+REFS_PER_TARGET = 2 # 2 refs * ~740 source rows = ~1500 training rows (Optimal Configuration)
 
 # Filter thresholds
 MIN_DUR_SEC  = 1.0
