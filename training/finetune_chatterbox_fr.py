@@ -98,7 +98,7 @@ class TrainingConfig:
     min_learning_rate: float = 1e-6
     max_grad_norm: float = 1.0
     warmup_ratio: float = 0.0   # Disabled by default per project recommendation
-    fp16: bool = True
+    fp16: bool = False
     compile_model: bool = False  # disabled: CUDA graph bug on torch 2.4.x
     seed: int = 42
     weight_decay: float = 0.0   # Disabled by default
