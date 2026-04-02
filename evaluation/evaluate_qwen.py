@@ -72,18 +72,10 @@ def main():
         ds_test = ds_test.select(indices)
     total = len(ds_test)
 
-    print(f"🚀 Loading Qwen3-TTS Model: {args.model_name}")
-    from qwen_tts import Qwen3TTSModel
-    model = Qwen3TTSModel.from_pretrained(
-        args.model_name,
-        device_map="cuda:0",
-        dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2"
-    )
-
     print(f"\n🎙 PHASE 1/3: Generating {total} audio samples ...")
     samples_data = []
     skipped = 0
+    model = None
     
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
@@ -97,15 +89,32 @@ def main():
         
         if not ref_data or not text_fr or not text_en: 
             skipped += 1
-            print(f"Skipping {i}: Missing data")
             continue
             
-        ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
+        synth_wav_path = os.path.join(args.output_dir, f"qwen_{i:05d}.wav")
         
-        if gt_data:
-            gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_")
-        else:
-            gt_wav_path = None
+        # Check if already generated
+        if os.path.exists(synth_wav_path):
+            gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_") if gt_data else None
+            samples_data.append({
+                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path,
+                "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
+            })
+            continue
+
+        # Load model lazily
+        if model is None:
+            print(f"🚀 Loading Qwen3-TTS Model: {args.model_name}")
+            from qwen_tts import Qwen3TTSModel
+            model = Qwen3TTSModel.from_pretrained(
+                args.model_name,
+                device_map="cuda:0",
+                dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2"
+            )
+
+        ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
+        gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_") if gt_data else None
             
         try:
             wavs, sr = model.generate_voice_clone(
@@ -114,7 +123,6 @@ def main():
                 ref_audio=ref_wav_path,
                 ref_text=text_en,
             )
-            synth_wav_path = os.path.join(args.output_dir, f"qwen_{i:05d}.wav")
             sf.write(synth_wav_path, wavs[0], sr)
             
             samples_data.append({
@@ -130,8 +138,9 @@ def main():
         os.remove(ref_wav_path)
         
     # Free up memory before ASR
-    del model
-    torch.cuda.empty_cache()
+    if model is not None:
+        del model
+        torch.cuda.empty_cache()
 
     print(f"\n🎙 PHASE 2/3: Transcribing with faster-whisper {args.whisper_model} ...")
     from faster_whisper import WhisperModel
