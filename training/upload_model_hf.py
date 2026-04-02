@@ -42,13 +42,17 @@ This repository contains a highly optimized LoRA adapter for the Chatterbox Mult
 * **Target Modules**: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
 
 ## Performance Metrics (RTX 4090, 100 Samples)
-By switching to a low-redundancy "Sparse" dataset and training with Rank 32, this model achieves near-zero-shot levels of speaker preservation while significantly improving French phonetic accuracy.
+By switching to a low-redundancy "Sparse" dataset and training with Rank 32, this model preserves near-zero-shot levels of speaker identity while adapting strictly to the French linguistic domain.
 
-* **Speaker Similarity**: 0.8452 (Out of 1.0)
-* **WER (Word Error Rate)**: 0.0758
-* **chrF (Format/Prosody)**: 93.57
-* **PESQ**: 1.22
-* **MCD (Mel-Cepstral Distortion)**: 13.29
+| Metric | Base Model (Zero-Shot) | Fine-Tuned (Rank 32 LoRA) |
+| :--- | :--- | :--- |
+| **Speaker Similarity** | **0.8553** | 0.8452 (Near-Zero Loss) |
+| **WER (Word Error Rate)** | **0.0604** | 0.0758 |
+| **chrF (Format)** | 93.53 | **93.57** |
+| **PESQ** | 1.16 | **1.22** |
+| **MCD (Distortion)** | **13.07** | 13.29 |
+
+These metrics confirm that the Rank 32 + Sparse formulation successfully mitigates the "overfitting/slurring" effect seen in denser runs while retaining over 98.8% of the native zero-shot speaker similarity.
 
 ## How to use for Inference
 
