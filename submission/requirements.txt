@@ -1,0 +1,40 @@
+# IWSLT 2026 Voice Cloning Submission Pipeline
+# Python 3.11+
+
+# Core
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# TTS Models
+# Qwen3-TTS
+qwen-tts>=0.1.0
+transformers>=4.40.0
+
+# CosyVoice3 (install from source: pip install -e . from FunAudioLLM/CosyVoice repo)
+# cosyvoice  # installed from git
+
+# XTTS (Coqui)
+TTS>=0.22.0
+
+# Audio I/O
+soundfile>=0.12.0
+librosa>=0.11.0
+numpy>=1.24.0
+
+# ASR (evaluation)
+faster-whisper>=1.0.0
+
+# Metrics
+jiwer>=3.0.0
+sacrebleu>=2.4.0
+speechbrain>=1.0.0
+pesq>=0.0.4
+pystoi>=0.3.3
+pymcd>=0.2.1
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# Utilities
+tqdm>=4.65.0
+datasets>=2.15.0,<4.0
+huggingface_hub>=0.20.0
