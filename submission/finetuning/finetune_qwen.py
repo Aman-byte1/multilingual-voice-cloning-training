@@ -222,10 +222,13 @@ def run_sft(
     from torch.utils.data import DataLoader
     from transformers import AutoConfig
 
+    log_dir = os.path.join(output_model_path, "logs")
+    os.makedirs(log_dir, exist_ok=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision="bf16",
         log_with="tensorboard",
+        project_dir=log_dir,
     )
 
     log.info(f"Loading model: {init_model_path}")
