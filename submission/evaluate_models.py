@@ -318,25 +318,21 @@ def evaluate_on_dataset(
     log.info("  Computing metrics...")
     verifier = load_speaker_model(device=device)
     utmos_predictor = load_utmos(device=device)
-
-    wer_transforms = jiwer.Compose([
-        jiwer.ToLowerCase(),
-        jiwer.RemoveMultipleSpaces(),
-        jiwer.Strip(),
-        jiwer.RemovePunctuation(),
-        jiwer.ReduceToListOfListOfWords(),
-    ])
-
+    
+    import jiwer
+    
     results = []
     for s, tx in zip(samples, transcripts):
         # WER
         try:
-            wer = float(jiwer.wer(
-                s["text"], tx,
-                truth_transform=wer_transforms,
-                hypothesis_transform=wer_transforms,
-            )) if tx.strip() else 1.0
-        except Exception:
+            ref_clean = jiwer.RemovePunctuation()(s["text"].lower().strip())
+            hyp_clean = jiwer.RemovePunctuation()(tx.lower().strip())
+            if not ref_clean:
+                wer = 0.0 if not hyp_clean else 1.0
+            else:
+                wer = float(jiwer.wer(ref_clean, hyp_clean))
+        except Exception as e:
+            log.warning(f"WER Failed: {e}")
             wer = None
 
         # Speaker similarity (synth vs ref audio — cross-lingual)
