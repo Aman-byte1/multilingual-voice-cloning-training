@@ -135,18 +135,21 @@ def generate_qwen(text: str, ref_path: str, lang: str, model, **kwargs) -> str:
     os.close(fd)
 
     lang_map = {"ar": "Arabic", "zh": "Chinese", "fr": "French"}
+    ref_text = kwargs.get("ref_text", "")
 
     if hasattr(model, 'generate_voice_clone'):
         wavs, sr = model.generate_voice_clone(
             text=text,
             language=lang_map.get(lang, "English"),
             ref_audio=ref_path,
+            ref_text=ref_text,
         )
         sf.write(out_path, wavs[0], sr)
     else:
         wavs = model.generate(
             text=text,
             ref_audio_path=ref_path,
+            ref_text=ref_text,
             language=lang_map.get(lang, "English"),
         )
         if isinstance(wavs, torch.Tensor):
@@ -245,6 +248,7 @@ def evaluate_on_dataset(
     for i in tqdm(range(total), desc="Generating"):
         row = ds[i]
         text = (row.get("trg_fr_text") or row.get("text_fr") or "").strip()
+        ref_text = (row.get("ref_en_text") or row.get("text_en") or "").strip()
         ref_data = row.get("ref_en_voice") or row.get("audio_en")
 
         if not text or not ref_data:
@@ -266,7 +270,8 @@ def evaluate_on_dataset(
 
         try:
             syn_path = generate_fn(
-                text=text, ref_path=ref_path, lang=lang, model=model
+                text=text, ref_path=ref_path, lang=lang, model=model,
+                ref_text=ref_text,
             )
             samples.append({
                 "idx": i,
