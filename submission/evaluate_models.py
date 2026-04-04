@@ -318,21 +318,27 @@ def evaluate_on_dataset(
     log.info("  Computing metrics...")
     verifier = load_speaker_model(device=device)
     utmos_predictor = load_utmos(device=device)
-    
-    import jiwer
-    
+
+    import re
+    def normalize_text(text: str) -> str:
+        """Normalize text for WER: lowercase, remove punctuation (keep accented chars)."""
+        text = text.lower().strip()
+        text = re.sub(r'[^\w\s]', '', text, flags=re.UNICODE)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
     results = []
     for s, tx in zip(samples, transcripts):
         # WER
         try:
-            ref_clean = jiwer.RemovePunctuation()(s["text"].lower().strip())
-            hyp_clean = jiwer.RemovePunctuation()(tx.lower().strip())
-            if not ref_clean:
-                wer = 0.0 if not hyp_clean else 1.0
+            ref_norm = normalize_text(s["text"])
+            hyp_norm = normalize_text(tx) if tx.strip() else ""
+            if not hyp_norm:
+                wer = 1.0
             else:
-                wer = float(jiwer.wer(ref_clean, hyp_clean))
+                wer = float(jiwer.wer(ref_norm, hyp_norm))
         except Exception as e:
-            log.warning(f"WER Failed: {e}")
+            log.warning(f"    WER failed for sample {s['idx']}: {e}")
             wer = None
 
         # Speaker similarity (synth vs ref audio — cross-lingual)
