@@ -87,11 +87,17 @@ def load_qwen_model(model_name: str, device: str = "cuda"):
     log.info(f"Loading Qwen3-TTS: {model_name}")
     try:
         from qwen_tts import Qwen3TTSModel
+        try:
+            import flash_attn  # noqa
+            attn_impl = "flash_attention_2"
+        except ImportError:
+            attn_impl = "sdpa"
+            log.info("flash-attn not installed, using SDPA attention")
         model = Qwen3TTSModel.from_pretrained(
             model_name,
             device_map=device,
             dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_impl,
         )
         log.info("Qwen3-TTS loaded ✓")
         return model
