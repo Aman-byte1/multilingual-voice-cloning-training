@@ -19,12 +19,10 @@ import argparse
 import warnings
 import tempfile
 import numpy as np
-import librosa
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from typing import Optional, List, Dict, Tuple
 from tqdm import tqdm
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
@@ -216,7 +214,8 @@ def main():
                     cfg_weight=args.cfg_weight
                 )
             t1 = time.perf_counter()
-        except Exception:
+        except Exception as e:
+            print(f"   ⚠ Sample {i} generation failed: {e}")
             if ref_path and os.path.exists(ref_path): os.remove(ref_path)
             skipped += 1
             continue
@@ -226,7 +225,7 @@ def main():
         torchaudio.save(syn_path, wav_out, model_sr)
         
         elapsed = t1 - t0
-        audio_dur = wav_out.numel() / model_sr
+        audio_dur = wav_out.shape[-1] / model_sr
         inference_times.append(elapsed)
         audio_durations.append(audio_dur)
 
@@ -265,9 +264,22 @@ def main():
     print(f"\n📊 Phase 5: Computing Metrics")
     verifier = load_speaker_model(device=device)
     import jiwer
-    wer_transforms = jiwer.Compose([
-        jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip(), jiwer.RemovePunctuation(), jiwer.ReduceToListOfListOfWords(),
-    ])
+
+    # Language-appropriate text normalization
+    # RemovePunctuation destroys CJK characters — only use for Latin scripts
+    if target_lang in ("zh", "ar", "ja", "ko"):
+        wer_transforms = jiwer.Compose([
+            jiwer.ToLowerCase(),
+            jiwer.RemoveMultipleSpaces(),
+            jiwer.Strip(),
+        ])
+    else:
+        wer_transforms = jiwer.Compose([
+            jiwer.ToLowerCase(),
+            jiwer.RemoveMultipleSpaces(),
+            jiwer.Strip(),
+            jiwer.RemovePunctuation(),
+        ])
 
     results = []
     for s, tx in tqdm(zip(samples, transcripts), total=len(samples), desc="Metrics"):
@@ -281,23 +293,20 @@ def main():
             if tx.strip():
                 ref_clean = wer_transforms(s["text_target"])
                 hyp_clean = wer_transforms(tx)
-                if isinstance(ref_clean, list) and len(ref_clean) > 0 and isinstance(ref_clean[0], list): ref_clean = " ".join(ref_clean[0])
-                if isinstance(hyp_clean, list) and len(hyp_clean) > 0 and isinstance(hyp_clean[0], list): hyp_clean = " ".join(hyp_clean[0])
-                elif isinstance(ref_clean, list): ref_clean = " ".join(ref_clean)
-                if isinstance(hyp_clean, list): hyp_clean = " ".join(hyp_clean)
-                
                 w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
                 c = float(jiwer.cer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
             else:
                 w = c = 1.0
-        except Exception:
+        except Exception as e:
+            print(f"   ⚠ Metrics failed for sample {s['idx']}: {e}")
             w = c = None
 
         if os.path.exists(s["ref_path"]): os.remove(s["ref_path"])
 
         results.append({
             "idx": s["idx"], "WER": w, "CER": c, "Similarity": sim,
-            "InferenceS": s["inference_s"], "AudioDurS": s["audio_dur_s"], "RTF": s["rtf"]
+            "InferenceS": s["inference_s"], "AudioDurS": s["audio_dur_s"], "RTF": s["rtf"],
+            "transcript": tx, "reference": s["text_target"]
         })
 
     # Summary
@@ -315,9 +324,17 @@ def main():
         print(f"  {k:<16} {m:>9.4f} {f'±{s:.4f}' if not np.isnan(s) else '':>9}  {v:>3}/{len(results)}")
     print("=" * 62)
 
-    # Save
+    # Save summary
     with open(os.path.join(args.output_dir, "eval_summary.json"), "w") as f:
         json.dump(overall, f, indent=2)
+
+    # Save per-sample CSV for analysis
+    csv_path = os.path.join(args.output_dir, "eval_per_sample.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["idx", "WER", "CER", "Similarity", "InferenceS", "AudioDurS", "RTF", "reference", "transcript"])
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"\n  Per-sample results saved to {csv_path}")
 
 if __name__ == "__main__":
     main()
