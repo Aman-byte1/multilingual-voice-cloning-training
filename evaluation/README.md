@@ -1,0 +1,127 @@
+# Cross-Lingual Voice Cloning — Evaluation
+
+Evaluation pipeline for Chatterbox (base & LoRA) on the [ymoslem/acl-6060](https://huggingface.co/datasets/ymoslem/acl-6060) dataset.
+
+**Metrics:** WER, CER, Speaker Similarity, Inference Time, RTF
+
+---
+
+## Quick Start
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/Aman-byte1/multilingual-voice-cloning-training.git
+cd multilingual-voice-cloning-training
+```
+
+### 2. Install dependencies
+
+> **⚠️ Install PyTorch first** — match your server's CUDA version.
+> Run `nvidia-smi` to check your CUDA version.
+
+```bash
+# PyTorch + torchaudio (adjust cu121 to your CUDA version: cu118, cu124, etc.)
+pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu121
+
+# All other dependencies
+pip install -r evaluation/requirements.txt
+```
+
+### 3. Run evaluation
+
+#### Chinese (zh) — Base model
+
+```bash
+python evaluation/eval.py \
+  --dataset ymoslem/acl-6060 \
+  --split eval \
+  --whisper-lang zh \
+  --skip-lora \
+  --cfg-weight 0.0 \
+  --whisper-model large-v3 \
+  --output-dir ./eval_results/zh_base \
+  --cache-dir ./data_cache
+```
+
+#### Arabic (ar) — Base model
+
+```bash
+python evaluation/eval.py \
+  --dataset ymoslem/acl-6060 \
+  --split eval \
+  --whisper-lang ar \
+  --skip-lora \
+  --cfg-weight 0.0 \
+  --whisper-model large-v3 \
+  --output-dir ./eval_results/ar_base \
+  --cache-dir ./data_cache
+```
+
+#### French (fr) — LoRA fine-tuned
+
+```bash
+python evaluation/eval.py \
+  --dataset ymoslem/acl-6060 \
+  --split eval \
+  --whisper-lang fr \
+  --repo-id amanuelbyte/chatterbox-fr-lora \
+  --lora-file best_lora_adapter.pt \
+  --cfg-weight 0.0 \
+  --whisper-model large-v3 \
+  --output-dir ./eval_results/fr_lora \
+  --cache-dir ./data_cache
+```
+
+---
+
+## CLI Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--dataset` | `ymoslem/acl-6060` | HuggingFace dataset name |
+| `--split` | `eval` | Dataset split to evaluate |
+| `--whisper-lang` | `fr` | Target language code (`fr`, `ar`, `zh`, etc.) |
+| `--whisper-model` | `large-v3` | Faster-whisper model size |
+| `--whisper-beam` | `5` | Beam size for ASR decoding |
+| `--skip-lora` | `false` | Use base Chatterbox (no LoRA) |
+| `--repo-id` | `amanuelbyte/chatterbox-fr-lora` | HF repo for LoRA weights |
+| `--lora-file` | `best_lora_adapter.pt` | LoRA checkpoint filename |
+| `--cfg-weight` | `0.0` | Classifier-free guidance weight |
+| `--max-samples` | `None` | Limit number of samples (all if unset) |
+| `--output-dir` | `./eval_results` | Where to save outputs |
+| `--cache-dir` | `./data_cache` | Dataset cache directory |
+
+---
+
+## Output
+
+Results are saved to `<output-dir>/`:
+
+- `synth_XXXXX.wav` — Generated audio files
+- `eval_summary.json` — Aggregated metrics (mean, std, valid count)
+
+---
+
+## Troubleshooting
+
+### `torchvision::nms does not exist`
+**Cause:** Mismatched `torch` / `torchvision` versions.  
+**Fix:** Reinstall as a matched set:
+```bash
+pip install --force-reinstall torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu121
+```
+
+### `ImportError: please install 'torchcodec'`
+**Cause:** `datasets>=4.0` requires `torchcodec` for audio decoding.  
+**Fix:** Downgrade datasets:
+```bash
+pip install "datasets<4.0" soundfile
+```
+
+### `numpy` version conflicts
+**Cause:** `chatterbox-tts` requires `numpy<2.0`.  
+**Fix:**
+```bash
+pip install "numpy<2.0"
+```

@@ -89,9 +89,12 @@ def load_speaker_model(device="cuda"):
     )
 
 def extract_speaker_embedding(wav_path, model, device="cuda"):
+    """Extract speaker embedding, resampling to 16kHz (ECAPA-TDNN requirement)."""
     try:
-        from speechbrain.dataio.dataio import read_audio
-        wav = read_audio(wav_path).to(device)
+        wav, sr = torchaudio.load(wav_path)
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+        wav = wav.squeeze(0).to(device)  # mono
         emb = model.encode_batch(wav.unsqueeze(0))
         return emb.squeeze(0).squeeze(0).detach()
     except Exception:
