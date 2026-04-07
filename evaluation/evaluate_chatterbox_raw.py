@@ -140,6 +140,10 @@ def main():
     except Exception as e:
         sys.exit(f"❌  Failed to import ChatterboxMultilingualTTS. The error was:\n{e}\n\nPlease verify your chatterbox installation.")
 
+    # Disable cuDNN temporarily to avoid CUDNN_STATUS_NOT_INITIALIZED gracefully
+    # on A40 servers during Chatterbox's RNN weight flattening phase.
+    torch.backends.cudnn.enabled = False
+
     # Even though we are evaluating the raw model, we use the Multilingual 
     # class to support French (`language_id="fr"`) generation. It defaults to the correct HuggingFace repo.
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
