@@ -136,14 +136,13 @@ def main():
     # ── PHASE 2 · Load Chatterbox ────────────────────────────────────────────
     print(f"\n🔧 Phase 2: Loading Chatterbox from '{MODEL_ID}'")
     try:
-        from chatterbox.tts import ChatterboxTTS
-    except ImportError:
-        sys.exit(
-            "❌  'chatterbox' package not found.\n"
-            "    Install with: pip install git+https://github.com/resemble-ai/chatterbox.git"
-        )
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    except Exception as e:
+        sys.exit(f"❌  Failed to import ChatterboxMultilingualTTS. The error was:\n{e}\n\nPlease verify your chatterbox installation.")
 
-    model = ChatterboxTTS.from_pretrained(MODEL_ID, device=device)
+    # Even though we specify the raw Hugging Face model, we use the Multilingual 
+    # class to support French (`language_id="fr"`) generation
+    model = ChatterboxMultilingualTTS.from_pretrained(MODEL_ID, device=device)
     model_sr = model.sr
     print(f"   Sample rate : {model_sr} Hz")
     print(f"   Exaggeration: {args.exl}  |  CFG weight: {args.cfg_weight}")
