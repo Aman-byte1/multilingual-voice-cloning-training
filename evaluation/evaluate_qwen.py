@@ -114,29 +114,31 @@ def main():
                 attn_implementation="flash_attention_2"
             )
 
-        ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
-        gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_") if gt_data else None
+        ref_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
+        gt_path = None
+        if gt_data is not None:
+            gt_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_") if gt_data else None
             
         try:
             wavs, sr = model.generate_voice_clone(
                 text=text_fr,
                 language="French",
-                ref_audio=ref_wav_path,
+                ref_audio=ref_path,
                 ref_text=text_en,
             )
             sf.write(synth_wav_path, wavs[0], sr)
             
             samples_data.append({
-                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path, "ref_path": ref_wav_path,
+                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_path, "ref_path": ref_path,
                 "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
             })
         except Exception as e:
             skipped += 1
             tqdm.write(f"   ⚠ Sample {i} failed: {str(e)}")
-            if gt_wav_path and os.path.exists(gt_wav_path):
-                os.remove(gt_wav_path)
-            if os.path.exists(ref_wav_path):
-                os.remove(ref_wav_path)
+            if gt_path and os.path.exists(gt_path):
+                os.remove(gt_path)
+            if os.path.exists(ref_path):
+                os.remove(ref_path)
         
     # Free up memory before ASR
     if model is not None:

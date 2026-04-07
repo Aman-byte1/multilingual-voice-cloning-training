@@ -385,21 +385,25 @@ def main():
 
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
-        text_fr = (row.get("trg_fr_text") or "").strip()
-        text_en = (row.get("ref_en_text") or "").strip()
-        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice")
+        # Support both 'amanuelbyte' and 'ymoslem' schemas
+        text_fr = (row.get("trg_fr_text") or row.get("text_fr") or "").strip()
+        text_en = (row.get("ref_en_text") or row.get("text_en") or "").strip()
+        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice") or row.get("audio")
         gt_data = row.get("trg_fr_voice")
 
-        if not ref_data or not gt_data or not text_fr:
+        if not ref_data or not text_fr:
             skipped += 1
             continue
 
         ref_path = save_temp_wav(
             np.asarray(ref_data["array"], dtype=np.float32),
             ref_data["sampling_rate"], "ref_")
-        gt_path = save_temp_wav(
-            np.asarray(gt_data["array"], dtype=np.float32),
-            gt_data["sampling_rate"], "gt_")
+
+        gt_path = None
+        if gt_data is not None:
+             gt_path = save_temp_wav(
+                 np.asarray(gt_data["array"], dtype=np.float32),
+                 gt_data["sampling_rate"], "gt_")
 
         try:
             with torch.inference_mode():
@@ -507,11 +511,15 @@ def main():
         syn_path = s["syn_path"]
         spk = s["speaker_id"]
 
-        # --- Acoustic metrics ---
-        pesq_val = compute_pesq(gt_path, syn_path)
-        stoi_val = compute_stoi(gt_path, syn_path)
-        mcd_val = compute_mcd(gt_path, syn_path)
-        pitch_val = compute_pitch_correlation(gt_path, syn_path)
+        # Quality metrics (Require Ground Truth)
+        if gt_path is not None:
+            pesq_val = compute_pesq(gt_path, syn_path)
+            stoi_val = compute_stoi(gt_path, syn_path)
+            mcd_val = compute_mcd(gt_path, syn_path)
+            pitch_val = compute_pitch_correlation(gt_path, syn_path)
+        else:
+            pesq_val = stoi_val = mcd_val = pitch_val = None
+            
         utmos_val = compute_utmos(syn_path, utmos_predictor, device)
 
         # --- Speaker embeddings (using original English reference) ---
@@ -543,8 +551,8 @@ def main():
         except Exception:
             chr_val = None
 
-        # Clean temp files
-        if os.path.exists(gt_path):
+        # Cleanup temp files
+        if gt_path is not None and os.path.exists(gt_path):
             os.remove(gt_path)
         if os.path.exists(ref_path):
             os.remove(ref_path)

@@ -102,35 +102,51 @@ def main():
             })
             continue
 
+        # Support both 'amanuelbyte' and 'ymoslem' schemas
+        text_fr = (row.get("trg_fr_text") or row.get("text_fr") or "").strip()
+        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice") or row.get("audio")
+        gt_data  = row.get("trg_fr_voice")
+
+        if not ref_data or not text_fr:
+            skipped += 1
+            continue
+
+        ref_path = save_temp_wav(
+            np.asarray(ref_data["array"], dtype=np.float32),
+            ref_data["sampling_rate"], "ref_")
+
+        gt_path = None
+        if gt_data is not None:
+            gt_path = save_temp_wav(
+                np.asarray(gt_data["array"],  dtype=np.float32),
+                gt_data["sampling_rate"],  "gt_") if gt_data else None
+
         # Load model lazily
         if tts is None:
             print(f"🚀 Initializing Coqui XTTS-v2 ...")
             from TTS.api import TTS
             tts = TTS(args.model_name, gpu=True)
-
-        ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
-        gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_") if gt_data else None
             
         try:
             # XTTS-v2 generates at 24kHz natively
             tts.tts_to_file(
                 text=text_fr,
-                speaker_wav=ref_wav_path,
+                speaker_wav=ref_path,
                 language="fr",
                 file_path=synth_wav_path
             )
             
             samples_data.append({
-                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path, "ref_path": ref_wav_path,
+                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_path, "ref_path": ref_path,
                 "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
             })
         except Exception as e:
             skipped += 1
             tqdm.write(f"   ⚠ Sample {i} failed: {str(e)}")
-            if gt_wav_path and os.path.exists(gt_wav_path):
-                os.remove(gt_wav_path)
-            if os.path.exists(ref_wav_path):
-                os.remove(ref_wav_path)
+            if gt_path is not None and os.path.exists(gt_path):
+                os.remove(gt_path)
+            if os.path.exists(ref_path):
+                os.remove(ref_path)
         
     # Phase 2: ASR
     print(f"\n🎙 PHASE 2/3: Transcribing with faster-whisper {args.whisper_model} ...")
