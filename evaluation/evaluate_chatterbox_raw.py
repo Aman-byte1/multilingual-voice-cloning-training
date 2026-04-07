@@ -162,20 +162,25 @@ def main():
 
     for i in tqdm(range(total), desc="Generating"):
         row = ds_test[i]
-        text_fr = (row.get("trg_fr_text") or "").strip()
-        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice")
+        # Support both 'amanuelbyte' and 'ymoslem' schemas
+        text_fr = (row.get("trg_fr_text") or row.get("text_fr") or "").strip()
+        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice") or row.get("audio_en") or row.get("audio")
         gt_data  = row.get("trg_fr_voice")
 
-        if not ref_data or not gt_data or not text_fr:
+        if not ref_data or not text_fr:
+            print(f"\n   ⚠ Debug: sample {i} skipped! text_fr is {bool(text_fr)}, ref_data is {bool(ref_data)}")
             skipped += 1
             continue
 
         ref_path = save_temp_wav(
             np.asarray(ref_data["array"], dtype=np.float32),
             ref_data["sampling_rate"], "ref_")
-        gt_path = save_temp_wav(
-            np.asarray(gt_data["array"],  dtype=np.float32),
-            gt_data["sampling_rate"],  "gt_")
+            
+        gt_path = None
+        if gt_data is not None:
+            gt_path = save_temp_wav(
+                np.asarray(gt_data["array"],  dtype=np.float32),
+                gt_data["sampling_rate"],  "gt_")
 
         try:
             t0 = time.perf_counter()
@@ -190,8 +195,8 @@ def main():
             t1 = time.perf_counter()
         except Exception as e:
             tqdm.write(f"\n   ⚠ Generation failed sample {i}: {e}")
-            if os.path.exists(ref_path): os.remove(ref_path)
-            if os.path.exists(gt_path): os.remove(gt_path)
+            if ref_path and os.path.exists(ref_path): os.remove(ref_path)
+            if gt_path and os.path.exists(gt_path): os.remove(gt_path)
             skipped += 1
             continue
 
@@ -212,7 +217,7 @@ def main():
             "gt_path":      gt_path,
             "ref_path":     ref_path,
             "text_fr":      text_fr,
-            "text_en":      (row.get("ref_en_text") or "").strip(),
+            "text_en":      (row.get("ref_en_text") or row.get("text_en") or "").strip(),
             "speaker_id":   row.get("speaker_id", "unknown"),
             "inference_s":  elapsed,
             "audio_dur_s":  audio_dur,
@@ -287,11 +292,15 @@ def main():
         syn_path = s["syn_path"]
         spk      = s["speaker_id"]
 
-        # Quality metrics
-        pesq_val  = compute_pesq(gt_path, syn_path)
-        stoi_val  = compute_stoi(gt_path, syn_path)
-        mcd_val   = compute_mcd(gt_path, syn_path)
-        pitch_val = compute_pitch_correlation(gt_path, syn_path)
+        # Quality metrics (Require Ground Truth)
+        if gt_path is not None:
+            pesq_val  = compute_pesq(gt_path, syn_path)
+            stoi_val  = compute_stoi(gt_path, syn_path)
+            mcd_val   = compute_mcd(gt_path, syn_path)
+            pitch_val = compute_pitch_correlation(gt_path, syn_path)
+        else:
+            pesq_val = stoi_val = mcd_val = pitch_val = None
+            
         utmos_val = compute_utmos(syn_path, utmos_predictor, device)
 
         # Speaker similarity (against ORIGINAL source voice)
@@ -323,7 +332,7 @@ def main():
             chr_val = None
 
         # Cleanup temp files
-        if os.path.exists(gt_path):
+        if gt_path is not None and os.path.exists(gt_path):
             os.remove(gt_path)
         if os.path.exists(ref_path):
             os.remove(ref_path)

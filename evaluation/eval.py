@@ -388,10 +388,11 @@ def main():
         # Support both 'amanuelbyte' and 'ymoslem' schemas
         text_fr = (row.get("trg_fr_text") or row.get("text_fr") or "").strip()
         text_en = (row.get("ref_en_text") or row.get("text_en") or "").strip()
-        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice") or row.get("audio")
+        ref_data = row.get("ref_en_voice") or row.get("ref_fr_voice") or row.get("audio_en") or row.get("audio")
         gt_data = row.get("trg_fr_voice")
 
         if not ref_data or not text_fr:
+            print(f"\n   ⚠ Debug: sample {i} skipped! text_fr is {bool(text_fr)}, ref_data is {bool(ref_data)}")
             skipped += 1
             continue
 
@@ -414,8 +415,8 @@ def main():
                 )
         except Exception as e:
             print(f"\n   ⚠ Generation failed sample {i}: {e}")
-            if os.path.exists(ref_path): os.remove(ref_path)
-            if os.path.exists(gt_path): os.remove(gt_path)
+            if ref_path and os.path.exists(ref_path): os.remove(ref_path)
+            if gt_path and os.path.exists(gt_path): os.remove(gt_path)
             skipped += 1
             continue
 
