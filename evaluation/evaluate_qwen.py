@@ -96,8 +96,9 @@ def main():
         # Check if already generated
         if os.path.exists(synth_wav_path):
             gt_wav_path = save_temp_wav(np.asarray(gt_data["array"], dtype=np.float32), gt_data["sampling_rate"], "gt_") if gt_data else None
+            ref_wav_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
             samples_data.append({
-                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path,
+                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path, "ref_path": ref_wav_path,
                 "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
             })
             continue
@@ -126,7 +127,7 @@ def main():
             sf.write(synth_wav_path, wavs[0], sr)
             
             samples_data.append({
-                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path,
+                "idx": i, "synth_path": synth_wav_path, "gt_path": gt_wav_path, "ref_path": ref_wav_path,
                 "text_fr": text_fr, "text_en": text_en, "speaker_id": row.get("speaker_id", "unknown")
             })
         except Exception as e:
@@ -134,8 +135,8 @@ def main():
             tqdm.write(f"   ⚠ Sample {i} failed: {str(e)}")
             if gt_wav_path and os.path.exists(gt_wav_path):
                 os.remove(gt_wav_path)
-            
-        os.remove(ref_wav_path)
+            if os.path.exists(ref_wav_path):
+                os.remove(ref_wav_path)
         
     # Free up memory before ASR
     if model is not None:
@@ -165,10 +166,15 @@ def main():
         if s.get("gt_path"):
             p = compute_pesq_score(s["gt_path"], s["synth_path"])
             m = compute_mcd_score(s["gt_path"], s["synth_path"])
-            sim = float(verifier.verify_files(s["gt_path"], s["synth_path"])[0].item())
             os.remove(s["gt_path"])
         else:
-            p, m, sim = None, None, None
+            p, m = None, None
+
+        if s.get("ref_path"):
+            sim = float(verifier.verify_files(s["ref_path"], s["synth_path"])[0].item())
+            os.remove(s["ref_path"])
+        else:
+            sim = None
             
         ref_clean = jiwer.RemovePunctuation()(s["text_fr"].lower())
         hyp_clean = jiwer.RemovePunctuation()(tx.lower())

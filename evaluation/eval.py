@@ -410,12 +410,12 @@ def main():
                 )
         except Exception as e:
             print(f"\n   ⚠ Generation failed sample {i}: {e}")
-            os.remove(ref_path)
-            os.remove(gt_path)
+            if os.path.exists(ref_path): os.remove(ref_path)
+            if os.path.exists(gt_path): os.remove(gt_path)
             skipped += 1
             continue
 
-        os.remove(ref_path)
+        # Keep ref_path for speaker similarity in Phase 5
 
         syn_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
         wav_out = wav.cpu() if wav.dim() > 1 else wav.unsqueeze(0).cpu()
@@ -425,6 +425,7 @@ def main():
             "idx": i,
             "syn_path": syn_path,
             "gt_path": gt_path,
+            "ref_path": ref_path,
             "text_fr": text_fr,
             "text_en": text_en,
             "speaker_id": row.get("speaker_id", "unknown"),
@@ -502,6 +503,7 @@ def main():
             total=len(samples), desc="Computing metrics"):
 
         gt_path = s["gt_path"]
+        ref_path = s["ref_path"]
         syn_path = s["syn_path"]
         spk = s["speaker_id"]
 
@@ -512,15 +514,15 @@ def main():
         pitch_val = compute_pitch_correlation(gt_path, syn_path)
         utmos_val = compute_utmos(syn_path, utmos_predictor, device)
 
-        # --- Speaker embeddings ---
+        # --- Speaker embeddings (using original English reference) ---
         syn_emb = extract_speaker_embedding(syn_path, verifier, device)
-        gt_emb = extract_speaker_embedding(gt_path, verifier, device)
+        ref_emb = extract_speaker_embedding(ref_path, verifier, device)
 
-        if syn_emb is not None and gt_emb is not None:
+        if syn_emb is not None and ref_emb is not None:
             sim = float(F.cosine_similarity(
-                syn_emb.unsqueeze(0), gt_emb.unsqueeze(0)).item())
+                syn_emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
             synth_embeddings.append((syn_emb, spk))
-            gt_embeddings.append((gt_emb, spk))
+            gt_embeddings.append((ref_emb, spk))
         else:
             sim = None
 
@@ -541,9 +543,11 @@ def main():
         except Exception:
             chr_val = None
 
-        # Clean ground truth temp file
+        # Clean temp files
         if os.path.exists(gt_path):
             os.remove(gt_path)
+        if os.path.exists(ref_path):
+            os.remove(ref_path)
 
         results.append({
             "idx": s["idx"],
