@@ -316,12 +316,25 @@ def main():
 
         # WER
         try:
-            w = float(jiwer.wer(
-                s["text_fr"], tx,
-                truth_transform=wer_transforms,
-                hypothesis_transform=wer_transforms,
-            )) if tx.strip() else 1.0
-        except Exception:
+            if tx.strip():
+                ref_clean = wer_transforms(s["text_fr"])
+                hyp_clean = wer_transforms(tx)
+                
+                # Extract string out of list if transform wrapped it
+                if isinstance(ref_clean, list) and len(ref_clean) > 0 and isinstance(ref_clean[0], list):
+                    ref_clean = " ".join(ref_clean[0])
+                if isinstance(hyp_clean, list) and len(hyp_clean) > 0 and isinstance(hyp_clean[0], list):
+                    hyp_clean = " ".join(hyp_clean[0])
+                elif isinstance(ref_clean, list):
+                    ref_clean = " ".join(ref_clean)
+                if isinstance(hyp_clean, list):
+                    hyp_clean = " ".join(hyp_clean)
+
+                w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
+            else:
+                w = 1.0
+        except Exception as e:
+            print(f"WER Failed: {e}")
             w = None
 
         # chrF++
