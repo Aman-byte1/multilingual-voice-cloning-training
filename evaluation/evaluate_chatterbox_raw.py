@@ -140,9 +140,9 @@ def main():
     except Exception as e:
         sys.exit(f"❌  Failed to import ChatterboxMultilingualTTS. The error was:\n{e}\n\nPlease verify your chatterbox installation.")
 
-    # Even though we specify the raw Hugging Face model, we use the Multilingual 
-    # class to support French (`language_id="fr"`) generation
-    model = ChatterboxMultilingualTTS.from_pretrained(MODEL_ID, device=device)
+    # Even though we are evaluating the raw model, we use the Multilingual 
+    # class to support French (`language_id="fr"`) generation. It defaults to the correct HuggingFace repo.
+    model = ChatterboxMultilingualTTS.from_pretrained(device=device)
     model_sr = model.sr
     print(f"   Sample rate : {model_sr} Hz")
     print(f"   Exaggeration: {args.exl}  |  CFG weight: {args.cfg_weight}")
