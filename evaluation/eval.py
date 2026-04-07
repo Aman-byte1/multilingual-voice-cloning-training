@@ -300,6 +300,8 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--whisper-model", default="large-v3",
                         help="faster-whisper model size")
+    parser.add_argument("--cfg-weight", type=float, default=0.0,
+                        help="Chatterbox CFG weight (0.0 recommended cross-lingual)")
     parser.add_argument("--whisper-beam", type=int, default=5)
     parser.add_argument("--output-dir", default="./eval_results")
     parser.add_argument("--cache-dir", default="./data_cache")
@@ -411,7 +413,8 @@ def main():
                 wav = model.generate(
                     text_fr,
                     audio_prompt_path=ref_path,
-                    language_id="fr"
+                    language_id="fr",
+                    cfg_weight=args.cfg_weight
                 )
         except Exception as e:
             print(f"\n   ⚠ Generation failed sample {i}: {e}")
