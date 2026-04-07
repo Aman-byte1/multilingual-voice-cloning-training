@@ -182,6 +182,7 @@ def main():
             with torch.inference_mode():
                 wav = model.generate(
                     text_fr,
+                    language_id="fr",
                     audio_prompt_path=ref_path,
                     exaggeration=args.exl,
                     cfg_weight=args.cfg_weight,
