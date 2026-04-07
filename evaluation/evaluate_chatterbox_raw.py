@@ -95,8 +95,8 @@ def main():
                         help="Cap number of evaluated samples (stratified)")
     parser.add_argument("--exl", type=float, default=0.5,
                         help="Chatterbox exaggeration level (0–1)")
-    parser.add_argument("--cfg-weight", type=float, default=0.5,
-                        help="Chatterbox CFG weight")
+    parser.add_argument("--cfg-weight", type=float, default=0.0,
+                        help="Chatterbox CFG weight (0.0 recommended for cross-lingual)")
     parser.add_argument("--whisper-model", default="large-v3",
                         help="faster-whisper model size")
     parser.add_argument("--whisper-beam", type=int, default=5)
