@@ -129,6 +129,10 @@ def main():
     parser.add_argument("--whisper-beam", type=int, default=5)
     parser.add_argument("--whisper-lang", default="fr",
                         help="Language code (fr, ar, zh, etc.)")
+    parser.add_argument("--model-type", default="chatterbox", choices=["chatterbox", "qwen"],
+                        help="Model architecture to evaluate")
+    parser.add_argument("--model-name", default="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+                        help="HF model name for Qwen")
     parser.add_argument("--cfg-weight", type=float, default=0.0)
     parser.add_argument("--output-dir", default="./eval_results")
     parser.add_argument("--cache-dir", default="./data_cache")
@@ -138,8 +142,22 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.output_dir, exist_ok=True)
-    mode = "BASE" if args.skip_lora else "LoRA"
+    
+    # Model configuration
+    is_qwen = (args.model_type == "qwen")
     target_lang = args.whisper_lang.strip().lower()
+    mode = "BASE" if (args.skip_lora or is_qwen) else "LoRA"
+    
+    # Language mapping for Qwen
+    QWEN_LANG_MAP = {
+        "fr": "French",
+        "zh": "Chinese",
+        "ar": "Arabic",
+        "en": "English",
+        "es": "Spanish",
+        "ja": "Japanese",
+        "ko": "Korean"
+    }
 
     print("=" * 64)
     print(f"  CROSS-LINGUAL EVALUATION — {mode} ({target_lang})")
@@ -156,36 +174,47 @@ def main():
     total = len(ds_test)
     print(f"   Samples: {total}")
 
-    # PHASE 2: Load Chatterbox
-    print(f"\n🔧 Phase 2: Loading Chatterbox model")
-    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    # PHASE 2: Load Model
+    if is_qwen:
+        print(f"\n🔧 Phase 2: Loading Qwen model ({args.model_name})")
+        from qwen_tts import Qwen3TTSModel
+        model = Qwen3TTSModel.from_pretrained(
+            args.model_name,
+            device_map=device,
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2"
+        )
+        model_sr = 24000 # Qwen default
+    else:
+        print(f"\n🔧 Phase 2: Loading Chatterbox model")
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+        model = ChatterboxMultilingualTTS.from_pretrained(device=device)
 
-    if not args.skip_lora:
-        try:
-            lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
-            payload = torch.load(lora_path, map_location=device, weights_only=True)
-            lora_cfg = payload.get("config", {})
-            targets = lora_cfg.get("target_modules", ["q_proj", "v_proj"])
-            rank = lora_cfg.get("rank", 8)
-            alpha = lora_cfg.get("alpha", 16.0)
-            dropout = lora_cfg.get("dropout", 0.1)
-            
-            for name, module in model.t3.named_modules():
-                if isinstance(module, nn.Linear) and any(k in name for k in targets):
-                    parent_name = ".".join(name.split(".")[:-1])
-                    child_name = name.split(".")[-1]
-                    parent = model.t3.get_submodule(parent_name)
-                    setattr(parent, child_name, LoRALayer(module, rank=rank, alpha=alpha, dropout=dropout))
-            
-            lora_sd = payload.get("lora_state_dict", payload)
-            model.t3.load_state_dict(lora_sd, strict=False)
-            print(f"   LoRA injected from {args.repo_id} ✓")
-        except Exception as e:
-            print(f"   ⚠ Failed to load LoRA: {e}. Falling back to BASE.")
+        if not args.skip_lora:
+            try:
+                lora_path = hf_hub_download(repo_id=args.repo_id, filename=args.lora_file)
+                payload = torch.load(lora_path, map_location=device, weights_only=True)
+                lora_cfg = payload.get("config", {})
+                targets = lora_cfg.get("target_modules", ["q_proj", "v_proj"])
+                rank = lora_cfg.get("rank", 8)
+                alpha = lora_cfg.get("alpha", 16.0)
+                dropout = lora_cfg.get("dropout", 0.1)
+                
+                for name, module in model.t3.named_modules():
+                    if isinstance(module, nn.Linear) and any(k in name for k in targets):
+                        parent_name = ".".join(name.split(".")[:-1])
+                        child_name = name.split(".")[-1]
+                        parent = model.t3.get_submodule(parent_name)
+                        setattr(parent, child_name, LoRALayer(module, rank=rank, alpha=alpha, dropout=dropout))
+                
+                lora_sd = payload.get("lora_state_dict", payload)
+                model.t3.load_state_dict(lora_sd, strict=False)
+                print(f"   LoRA injected from {args.repo_id} ✓")
+            except Exception as e:
+                print(f"   ⚠ Failed to load LoRA: {e}. Falling back to BASE.")
 
-    model.t3.eval()
-    model_sr = model.sr
+        model.t3.eval()
+        model_sr = model.sr
 
     # PHASE 3: Generate
     print(f"\n🎙  Phase 3: Generating {total} samples")
@@ -223,12 +252,28 @@ def main():
         try:
             t0 = time.perf_counter()
             with torch.inference_mode():
-                wav = model.generate(
-                    text_target,
-                    audio_prompt_path=ref_path,
-                    language_id=target_lang,
-                    cfg_weight=args.cfg_weight
-                )
+                if is_qwen:
+                    # Qwen requires reference text and full language name
+                    ref_text = (row.get("ref_en_text") or row.get("text_en") or "").strip()
+                    full_lang = QWEN_LANG_MAP.get(target_lang, "English")
+                    
+                    wavs, sr_out = model.generate_voice_clone(
+                        text=text_target,
+                        language=full_lang,
+                        ref_audio=ref_path,
+                        ref_text=ref_text,
+                    )
+                    # Qwen returns (batch, samples), convert to torch
+                    wav = torch.from_numpy(wavs[0]).float()
+                    model_sr = sr_out
+                else:
+                    # Chatterbox
+                    wav = model.generate(
+                        text_target,
+                        audio_prompt_path=ref_path,
+                        language_id=target_lang,
+                        cfg_weight=args.cfg_weight
+                    )
             t1 = time.perf_counter()
         except Exception as e:
             print(f"   ⚠ Sample {i} generation failed: {e}")
