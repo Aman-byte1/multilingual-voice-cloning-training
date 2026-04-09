@@ -160,8 +160,8 @@ def main():
     temp_ref_dir = os.path.join(args.output_dir, "temp_ref")
     os.makedirs(temp_ref_dir, exist_ok=True)
 
-    # PHASE 1: Load dataset
-    print(f"\n📥 Phase 1: Loading dataset from {args.dataset}")
+    # PHASE 1: Load dataset and pre-extract to disk
+    print(f"\n📥 Phase 1: Loading dataset and extracting to disk")
     ds_test = load_dataset(args.dataset, split=args.split, cache_dir=args.cache_dir)
     total = len(ds_test)
     if args.max_samples and args.max_samples < total:
@@ -171,7 +171,36 @@ def main():
     total = len(ds_test)
     print(f"   Samples: {total}")
 
-    # PHASE 2: Load Chatterbox
+    # Pre-extract all text and ref audio to disk, then free the dataset
+    print(f"   Extracting references to {temp_ref_dir} ...")
+    manifest = []  # lightweight list of dicts (no audio data)
+    for i in tqdm(range(total), desc="Extracting"):
+        row = ds_test[i]
+        text_target = (row.get(f"trg_{target_lang}_text") or row.get(f"text_{target_lang}") or "").strip()
+        ref_data = row.get("ref_en_voice") or row.get(f"ref_{target_lang}_voice") or row.get("audio_en") or row.get("audio")
+
+        if not ref_data or not text_target:
+            continue
+
+        ref_path = save_temp_wav(
+            np.asarray(ref_data["array"], dtype=np.float32),
+            ref_data["sampling_rate"],
+            f"ref_{i:05d}",
+            output_dir=temp_ref_dir
+        )
+        manifest.append({
+            "idx": i,
+            "text_target": text_target,
+            "ref_path": ref_path,
+            "speaker_id": row.get("speaker_id", "unknown"),
+        })
+
+    # FREE the dataset — this is the key RAM savings
+    del ds_test, row, ref_data
+    gc.collect()
+    print(f"   Extracted {len(manifest)} samples. Dataset freed from RAM.")
+
+    # PHASE 2: Load Chatterbox (dataset is gone, RAM is free)
     print(f"\n🔧 Phase 2: Loading Chatterbox model")
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
@@ -202,29 +231,18 @@ def main():
     model.t3.eval()
     model_sr = model.sr
 
-    # PHASE 3: Generate
-    print(f"\n🎙  Phase 3: Generating {total} samples")
+    # PHASE 3: Generate (using pre-extracted manifest, not dataset)
+    print(f"\n🎙  Phase 3: Generating {len(manifest)} samples")
     samples = []
     skipped = 0
     inference_times = []
     audio_durations = []
 
-    for i in tqdm(range(total), desc="Generating"):
-        row = ds_test[i]
-        text_target = (row.get(f"trg_{target_lang}_text") or row.get(f"text_{target_lang}") or "").strip()
-        ref_data = row.get("ref_en_voice") or row.get(f"ref_{target_lang}_voice") or row.get("audio_en") or row.get("audio")
-
-        if not ref_data or not text_target:
-            skipped += 1
-            continue
-
+    for entry in tqdm(manifest, desc="Generating"):
+        i = entry["idx"]
         syn_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
-        ref_path = save_temp_wav(
-            np.asarray(ref_data["array"], dtype=np.float32), 
-            ref_data["sampling_rate"], 
-            f"ref_{i:05d}", 
-            output_dir=temp_ref_dir
-        )
+        ref_path = entry["ref_path"]
+        text_target = entry["text_target"]
 
         # Resume logic: skip generation if file exists and --resume is set
         if args.resume and os.path.exists(syn_path):
@@ -233,12 +251,12 @@ def main():
                 audio_dur = wav_info.num_frames / wav_info.sample_rate
                 samples.append({
                     "idx": i, "syn_path": syn_path, "ref_path": ref_path,
-                    "text_target": text_target, "speaker_id": row.get("speaker_id", "unknown"),
+                    "text_target": text_target, "speaker_id": entry["speaker_id"],
                     "inference_s": 0, "audio_dur_s": audio_dur, "rtf": 0
                 })
                 continue
             except Exception:
-                pass # If file is corrupt, re-generate
+                pass  # If file is corrupt, re-generate
 
         try:
             t0 = time.perf_counter()
@@ -252,15 +270,19 @@ def main():
             t1 = time.perf_counter()
         except Exception as e:
             print(f"   ⚠ Sample {i} generation failed: {e}")
-            if ref_path and os.path.exists(ref_path): os.remove(ref_path)
             skipped += 1
             continue
 
         wav_out = wav.cpu() if wav.dim() > 1 else wav.unsqueeze(0).cpu()
         torchaudio.save(syn_path, wav_out, model_sr)
+        del wav, wav_out  # free immediately
         
         elapsed = t1 - t0
-        audio_dur = wav_out.shape[-1] / model_sr
+        try:
+            info = torchaudio.info(syn_path)
+            audio_dur = info.num_frames / info.sample_rate
+        except Exception:
+            audio_dur = 0
         inference_times.append(elapsed)
         audio_durations.append(audio_dur)
 
@@ -269,14 +291,15 @@ def main():
             "syn_path": syn_path,
             "ref_path": ref_path,
             "text_target": text_target,
-            "speaker_id": row.get("speaker_id", "unknown"),
+            "speaker_id": entry["speaker_id"],
             "inference_s": elapsed,
             "audio_dur_s": audio_dur,
             "rtf": elapsed / audio_dur if audio_dur > 0 else 0
         })
 
-        # Proactive OOM prevention: clear cache every 50 samples
-        if i % 50 == 0:
+        # Proactive OOM prevention: clear cache every 25 samples
+        if i % 25 == 0:
+            gc.collect()
             torch.cuda.empty_cache()
 
     print(f"   Generated: {len(samples)} | Skipped: {skipped}")
