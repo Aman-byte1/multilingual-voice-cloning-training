@@ -39,6 +39,9 @@ echo "Using PyTorch index: $CUDA_TAG"
 
 # 3. Install PyTorch (matched set — torch + torchaudio + torchvision)
 echo ""
+echo "Cleaning old installations..."
+pip uninstall -y torch torchvision torchaudio || true
+
 echo "Installing PyTorch..."
 # Using 2.5.1 as it is widely available in all indices
 pip install --force-reinstall torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1 \
