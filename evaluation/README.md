@@ -16,12 +16,16 @@ bash evaluation/setup.sh
 ```
 
 ### 2. Manual Installation (Optional)
-If you prefer manual installation:
+If you prefer manual installation (confirmed working for CUDA 12.8):
 ```bash
-# Install PyTorch with correct CUDA (auto-detected in setup.sh)
-pip install torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu121
+# Aggressive clean
+pip uninstall -y torch torchvision torchaudio
+
+# Install matched set
+pip install --force-reinstall torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 
 # All other dependencies
+pip install "datasets<4.0" soundfile
 pip install -r evaluation/requirements.txt
 ```
 

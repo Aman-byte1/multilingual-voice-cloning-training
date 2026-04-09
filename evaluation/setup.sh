@@ -43,9 +43,9 @@ echo "Cleaning old installations..."
 pip uninstall -y torch torchvision torchaudio || true
 
 echo "Installing PyTorch..."
-# Using 2.5.1 as it is widely available in all indices
-pip install --force-reinstall torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1 \
-    --extra-index-url https://download.pytorch.org/whl/$CUDA_TAG
+# Confirmed working version for CUDA 12.8
+pip install --force-reinstall torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 \
+    --index-url https://download.pytorch.org/whl/cu124
 
 # 4. Install pinned dependencies for chatterbox-tts
 echo ""
