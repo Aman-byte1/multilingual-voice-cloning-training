@@ -33,29 +33,31 @@ pip install -r evaluation/requirements.txt
 
 Use the `--resume` flag to avoid re-generating samples if the process was interrupted (e.g., OOM or crash).
 
-### Chatterbox (Base)
+### French (fr) — Base model
 ```bash
 python evaluation/eval.py \
-  --model-type chatterbox \
-  --dataset ymoslem/acl-6060 --split eval --whisper-lang zh \
-  --skip-lora --output-dir ./eval_results/zh_chatterbox \
-  --resume
-```
-
-### Qwen3-TTS (Base)
-```bash
-python evaluation/eval.py \
-  --model-type qwen \
-  --dataset ymoslem/acl-6060 --split eval --whisper-lang zh \
-  --output-dir ./eval_results/zh_qwen \
-  --resume
-```
-
-### Chatterbox (LoRA)
-```bash
-python evaluation/eval.py \
-  --model-type chatterbox \
   --dataset ymoslem/acl-6060 --split eval --whisper-lang fr \
+  --skip-lora --cfg-weight 0.0 --whisper-model large-v3 \
+  --output-dir ./eval_results/fr_base --cache-dir ./data_cache \
+  --resume
+```
+
+### Chinese (zh) — Base model
+```bash
+python evaluation/eval.py \
+  --dataset ymoslem/acl-6060 --split eval --whisper-lang zh \
+  --skip-lora --cfg-weight 0.0 --whisper-model large-v3 \
+  --output-dir ./eval_results/zh_base --cache-dir ./data_cache \
+  --resume
+```
+
+#### French (fr) — LoRA fine-tuned
+
+```bash
+python evaluation/eval.py \
+  --dataset ymoslem/acl-6060 \
+  --split eval \
+  --whisper-lang fr \
   --repo-id amanuelbyte/chatterbox-fr-lora \
   --lora-file best_lora_adapter.pt \
   --cfg-weight 0.0 \
