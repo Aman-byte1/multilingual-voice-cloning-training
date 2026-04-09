@@ -188,8 +188,9 @@ def main():
         row = ds_test[i]
         text_target = (row.get(f"trg_{target_lang}_text") or row.get(f"text_{target_lang}") or "").strip()
         ref_data = row.get("ref_en_voice") or row.get(f"ref_{target_lang}_voice") or row.get("audio_en") or row.get("audio")
+        ref_text = (row.get("ref_en_text") or row.get("text_en") or "").strip()
 
-        if not ref_data or not text_target:
+        if not ref_data or not text_target or not ref_text:
             skipped += 1
             continue
 
@@ -224,6 +225,7 @@ def main():
                         text=text_target,
                         language=qwen_lang,
                         ref_audio=ref_path,
+                        ref_text=ref_text,
                     )
                     wav_np = wavs[0] if isinstance(wavs, list) else wavs
                     if isinstance(wav_np, torch.Tensor):
@@ -236,6 +238,7 @@ def main():
                     wavs = model.generate(
                         text=text_target,
                         ref_audio_path=ref_path,
+                        ref_text=ref_text,
                         language=qwen_lang,
                     )
                     if isinstance(wavs, torch.Tensor):
