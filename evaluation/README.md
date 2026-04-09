@@ -6,56 +6,45 @@ Evaluation pipeline for Chatterbox (base & LoRA) on the [ymoslem/acl-6060](https
 
 ---
 
-## Quick Start
+## Setup & Installation
 
-### 1. Clone the repo
+### 1. Fresh Server Setup
+If you are on a new server or hit environment errors (like `torchvision::nms` issues), run the setup script:
 
 ```bash
-git clone https://github.com/Aman-byte1/multilingual-voice-cloning-training.git
-cd multilingual-voice-cloning-training
+bash evaluation/setup.sh
 ```
 
-### 2. Install dependencies
-
-> **⚠️ Install PyTorch first** — match your server's CUDA version.
-> Run `nvidia-smi` to check your CUDA version.
-
+### 2. Manual Installation (Optional)
+If you prefer manual installation:
 ```bash
-# PyTorch + torchaudio (adjust cu121 to your CUDA version: cu118, cu124, etc.)
-pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch with correct CUDA (auto-detected in setup.sh)
+pip install torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu121
 
 # All other dependencies
 pip install -r evaluation/requirements.txt
 ```
 
-### 3. Run evaluation
+## Running Evaluation
 
-#### Chinese (zh) — Base model
+Use the `--resume` flag to avoid re-generating samples if the process was interrupted (e.g., OOM or crash).
 
+### French (fr) — Base model
 ```bash
 python evaluation/eval.py \
-  --dataset ymoslem/acl-6060 \
-  --split eval \
-  --whisper-lang zh \
-  --skip-lora \
-  --cfg-weight 0.0 \
-  --whisper-model large-v3 \
-  --output-dir ./eval_results/zh_base \
-  --cache-dir ./data_cache
+  --dataset ymoslem/acl-6060 --split eval --whisper-lang fr \
+  --skip-lora --cfg-weight 0.0 --whisper-model large-v3 \
+  --output-dir ./eval_results/fr_base --cache-dir ./data_cache \
+  --resume
 ```
 
-#### Arabic (ar) — Base model
-
+### Chinese (zh) — Base model
 ```bash
 python evaluation/eval.py \
-  --dataset ymoslem/acl-6060 \
-  --split eval \
-  --whisper-lang ar \
-  --skip-lora \
-  --cfg-weight 0.0 \
-  --whisper-model large-v3 \
-  --output-dir ./eval_results/ar_base \
-  --cache-dir ./data_cache
+  --dataset ymoslem/acl-6060 --split eval --whisper-lang zh \
+  --skip-lora --cfg-weight 0.0 --whisper-model large-v3 \
+  --output-dir ./eval_results/zh_base --cache-dir ./data_cache \
+  --resume
 ```
 
 #### French (fr) — LoRA fine-tuned

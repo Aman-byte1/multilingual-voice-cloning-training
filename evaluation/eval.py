@@ -133,6 +133,7 @@ def main():
     parser.add_argument("--output-dir", default="./eval_results")
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--skip-lora", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Skip generation if audio already exists")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -202,7 +203,22 @@ def main():
             skipped += 1
             continue
 
+        syn_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
         ref_path = save_temp_wav(np.asarray(ref_data["array"], dtype=np.float32), ref_data["sampling_rate"], "ref_")
+
+        # Resume logic: skip generation if file exists and --resume is set
+        if args.resume and os.path.exists(syn_path):
+            try:
+                wav_info = torchaudio.info(syn_path)
+                audio_dur = wav_info.num_frames / wav_info.sample_rate
+                samples.append({
+                    "idx": i, "syn_path": syn_path, "ref_path": ref_path,
+                    "text_target": text_target, "speaker_id": row.get("speaker_id", "unknown"),
+                    "inference_s": 0, "audio_dur_s": audio_dur, "rtf": 0
+                })
+                continue
+            except Exception:
+                pass # If file is corrupt, re-generate
 
         try:
             t0 = time.perf_counter()
@@ -220,7 +236,6 @@ def main():
             skipped += 1
             continue
 
-        syn_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
         wav_out = wav.cpu() if wav.dim() > 1 else wav.unsqueeze(0).cpu()
         torchaudio.save(syn_path, wav_out, model_sr)
         
