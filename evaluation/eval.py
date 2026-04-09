@@ -26,7 +26,7 @@ import torch.nn.functional as F
 import torchaudio
 from tqdm import tqdm
 from datasets import load_dataset
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, login
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -140,7 +140,12 @@ def main():
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--skip-lora", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip generation if audio already exists")
+    parser.add_argument("--hf-token", default=None, help="Hugging Face API token for authentication")
     args = parser.parse_args()
+
+    if args.hf_token:
+        print("🔑 Authenticating with Hugging Face...")
+        login(token=args.hf_token)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.output_dir, exist_ok=True)
