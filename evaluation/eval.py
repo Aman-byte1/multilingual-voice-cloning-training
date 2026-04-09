@@ -255,6 +255,10 @@ def main():
             "rtf": elapsed / audio_dur if audio_dur > 0 else 0
         })
 
+        # Proactive OOM prevention: clear cache every 50 samples
+        if i % 50 == 0:
+            torch.cuda.empty_cache()
+
     print(f"   Generated: {len(samples)} | Skipped: {skipped}")
     del model
     torch.cuda.empty_cache()
