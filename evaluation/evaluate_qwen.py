@@ -33,14 +33,21 @@ warnings.filterwarnings("ignore")
 
 # ===================================================================
 # Language config — Qwen uses full language names
+# Qwen3-TTS supported: chinese, english, french, german, italian,
+#                       japanese, korean, portuguese, russian, spanish
+# NOTE: Arabic is NOT supported by Qwen3-TTS
 # ===================================================================
 QWEN_LANG_MAP = {
     "fr": "French",
-    "ar": "Arabic",
     "zh": "Chinese",
     "en": "English",
+    "de": "German",
+    "it": "Italian",
     "ja": "Japanese",
     "ko": "Korean",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "es": "Spanish",
 }
 
 
@@ -126,7 +133,14 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.output_dir, exist_ok=True)
     target_lang = args.whisper_lang.strip().lower()
-    qwen_lang = QWEN_LANG_MAP.get(target_lang, target_lang.capitalize())
+
+    if target_lang not in QWEN_LANG_MAP:
+        print(f"\n❌ ERROR: '{target_lang}' is NOT supported by Qwen3-TTS.")
+        print(f"   Supported: {', '.join(sorted(QWEN_LANG_MAP.keys()))}")
+        print(f"   Use Chatterbox or XTTS-v2 for {target_lang} instead.")
+        sys.exit(1)
+
+    qwen_lang = QWEN_LANG_MAP[target_lang]
 
     print("=" * 64)
     print(f"  QWEN3-TTS EVALUATION ({target_lang} / {qwen_lang})")
