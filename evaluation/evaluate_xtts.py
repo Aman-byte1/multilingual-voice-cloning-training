@@ -30,6 +30,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 torch.set_float32_matmul_precision("high")
 warnings.filterwarnings("ignore")
 
+# ---- Monkey-patch for coqui-tts 0.27.5 + transformers>=4.57 compat ----
+# coqui-tts imports `isin_mps_friendly` which was removed in transformers 4.57
+import transformers.pytorch_utils as _pu
+if not hasattr(_pu, "isin_mps_friendly"):
+    _pu.isin_mps_friendly = torch.isin
+
 # ===================================================================
 # Language config — XTTS-v2 uses ISO codes (with zh-cn for Chinese)
 # Supports: en, es, fr, de, it, pt, pl, tr, ru, nl, cs, ar, zh-cn,
