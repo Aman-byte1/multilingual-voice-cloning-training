@@ -101,6 +101,8 @@ def main():
     parser.add_argument("--output-dir", default="./eval_results_omnivoice")
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--resume", action="store_true", help="Skip if audio exists")
+    parser.add_argument("--use-ref-text", action="store_true",
+                        help="Pass English ref transcript to model for transcript-assisted cloning")
     parser.add_argument("--hf-token", default=None)
     args = parser.parse_args()
 
@@ -111,8 +113,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     target_lang = args.whisper_lang.strip().lower()
 
+    ref_text_mode = "WITH ref_text" if args.use_ref_text else "NO ref_text"
     print("=" * 64)
-    print(f"  OmniVoice EVALUATION ({target_lang})")
+    print(f"  OmniVoice EVALUATION ({target_lang}) [{ref_text_mode}]")
     print("=" * 64)
 
     temp_ref_dir = os.path.join(args.output_dir, "temp_ref")
@@ -140,6 +143,9 @@ def main():
                     row.get(f"ref_{target_lang}_voice") or
                     row.get("audio_en") or
                     row.get("audio"))
+        # Extract English ref transcript for ref_text mode
+        ref_en_text = (row.get("ref_en_text") or
+                       row.get("text_en") or "").strip()
 
         if not ref_data or not text_target:
             continue
@@ -154,6 +160,7 @@ def main():
             "idx": i,
             "text_target": text_target,
             "ref_path": ref_path,
+            "ref_en_text": ref_en_text,
             "speaker_id": row.get("speaker_id", "unknown"),
         })
 
@@ -204,11 +211,13 @@ def main():
 
         try:
             t0 = time.perf_counter()
-            # Zero-shot voice cloning (audio-only, no ref_text)
-            audio_out = model.generate(
-                text=text_target,
-                ref_audio=ref_path,
-            )
+            gen_kwargs = {
+                "text": text_target,
+                "ref_audio": ref_path,
+            }
+            if args.use_ref_text and entry.get("ref_en_text"):
+                gen_kwargs["ref_text"] = entry["ref_en_text"]
+            audio_out = model.generate(**gen_kwargs)
             t1 = time.perf_counter()
 
             # audio_out is a list of tensors with shape (1, T) at 24kHz

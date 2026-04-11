@@ -98,6 +98,8 @@ def main():
     parser.add_argument("--output-dir", default="./eval_results_voxcpm")
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--resume", action="store_true", help="Skip if audio exists")
+    parser.add_argument("--use-ref-text", action="store_true",
+                        help="Use 'Ultimate Cloning' mode with prompt_text for better quality")
     parser.add_argument("--hf-token", default=None)
     args = parser.parse_args()
 
@@ -108,8 +110,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     target_lang = args.whisper_lang.strip().lower()
 
+    ref_text_mode = "Ultimate Cloning" if args.use_ref_text else "Controllable Cloning"
     print("=" * 64)
-    print(f"  VoxCPM2 EVALUATION ({target_lang})")
+    print(f"  VoxCPM2 EVALUATION ({target_lang}) [{ref_text_mode}]")
     print("=" * 64)
 
     temp_ref_dir = os.path.join(args.output_dir, "temp_ref")
@@ -131,6 +134,8 @@ def main():
         row = ds_test[i]
         text_target = (row.get(f"trg_{target_lang}_text") or row.get(f"text_{target_lang}") or "").strip()
         ref_data = row.get("ref_en_voice") or row.get(f"ref_{target_lang}_voice") or row.get("audio_en") or row.get("audio")
+        # Extract English ref transcript for Ultimate Cloning mode
+        ref_en_text = (row.get("ref_en_text") or row.get("text_en") or "").strip()
 
         if not ref_data or not text_target:
             continue
@@ -145,6 +150,7 @@ def main():
             "idx": i,
             "text_target": text_target,
             "ref_path": ref_path,
+            "ref_en_text": ref_en_text,
             "speaker_id": row.get("speaker_id", "unknown"),
         })
 
@@ -191,13 +197,23 @@ def main():
 
         try:
             t0 = time.perf_counter()
-            # Voice Cloning mode (audio only)
-            wav = model.generate(
-                text=text_target,
-                reference_wav_path=ref_path,
-                cfg_value=2.0,
-                inference_timesteps=10
-            )
+            if args.use_ref_text and entry.get("ref_en_text"):
+                # Ultimate Cloning: prompt_wav_path + prompt_text
+                wav = model.generate(
+                    text=text_target,
+                    prompt_wav_path=ref_path,
+                    prompt_text=entry["ref_en_text"],
+                    cfg_value=2.0,
+                    inference_timesteps=10
+                )
+            else:
+                # Controllable Cloning: reference_wav_path only
+                wav = model.generate(
+                    text=text_target,
+                    reference_wav_path=ref_path,
+                    cfg_value=2.0,
+                    inference_timesteps=10
+                )
             t1 = time.perf_counter()
             
             sf.write(syn_path, wav, VOX_SR)
