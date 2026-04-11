@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-S2ST Experiment: Can voice cloning models translate?
-=====================================================
-Tests VoxCPM2 by feeding English ref audio + English text
-but requesting output in French. Does it translate or just
-read English with a French accent?
-
-Run on A40 (48GB).
+S2ST Experiment v2: Can models generate from ref_text ONLY?
+============================================================
+Give ONLY: ref_audio + ref_text (English transcript)
+Do NOT give: target text
+See if the model can generate speech from just the reference.
 """
 
 import os
@@ -20,7 +18,7 @@ from huggingface_hub import login
 HF_TOKEN = os.environ.get("HF_TOKEN")
 DATASET = "ymoslem/acl-6060"
 NUM_SAMPLES = 3
-OUTPUT_DIR = "./s2st_experiment"
+OUTPUT_DIR = "./s2st_experiment_v2"
 
 login(token=HF_TOKEN)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -28,45 +26,15 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ── Extract test samples ───────────────────────────────────────────
 print("📥 Extracting test samples...")
 ds = load_dataset(DATASET, split="eval")
-print(f"   Dataset columns: {ds.column_names}")
 
 samples = []
 for i in range(min(NUM_SAMPLES, len(ds))):
     row = ds[i]
+    ref_data = row.get("audio")
+    en_text = row.get("text_en", "").strip()
+    fr_text = row.get("text_fr", "").strip()
 
-    # Try multiple possible column names
-    en_text = ""
-    for col in ["ref_en_text", "text_en", "en_text", "source_text"]:
-        val = row.get(col, "")
-        if val and val.strip():
-            en_text = val.strip()
-            break
-
-    fr_text = ""
-    for col in ["trg_fr_text", "text_fr", "fr_text", "target_text"]:
-        val = row.get(col, "")
-        if val and val.strip():
-            fr_text = val.strip()
-            break
-
-    ref_data = None
-    for col in ["ref_en_voice", "audio_en", "audio", "ref_voice"]:
-        val = row.get(col)
-        if val is not None and "array" in val:
-            ref_data = val
-            break
-
-    if not ref_data:
-        print(f"   ⚠ Sample {i}: no audio found, skipping")
-        continue
-
-    if not en_text and not fr_text:
-        # Last resort: print first row keys and values to debug
-        print(f"   ⚠ Sample {i}: no text found. Row keys: {list(row.keys())}")
-        # Try to grab ANY text columns
-        for k, v in row.items():
-            if isinstance(v, str) and len(v) > 10:
-                print(f"      {k}: {v[:80]}...")
+    if not ref_data or not en_text:
         continue
 
     ref_path = os.path.join(OUTPUT_DIR, f"ref_en_{i:03d}.wav")
@@ -83,20 +51,19 @@ for i in range(min(NUM_SAMPLES, len(ds))):
 
 del ds; gc.collect()
 print(f"   Got {len(samples)} samples\n")
-
 for s in samples:
     print(f"   Sample {s['idx']}:")
-    print(f"     EN: {s['en_text'][:100]}")
-    print(f"     FR: {s['fr_text'][:100]}")
+    print(f"     EN ref_text: {s['en_text'][:100]}")
+    print(f"     FR trg_text: {s['fr_text'][:100]} (NOT used — this is just for comparison)")
 print()
 
 
 # ════════════════════════════════════════════════════════════════════
-# TEST: VoxCPM2
+# TEST 1: VoxCPM2 — ref_audio + prompt_text ONLY, no target text
 # ════════════════════════════════════════════════════════════════════
 def test_voxcpm():
     print("=" * 60)
-    print("  TEST: VoxCPM2")
+    print("  TEST: VoxCPM2 — ref_text only, NO target text")
     print("=" * 60)
     try:
         from voxcpm import VoxCPM
@@ -107,41 +74,63 @@ def test_voxcpm():
         return
 
     sr = model.tts_model.sample_rate
+
     for s in samples:
-        # Test A: Normal — FR text + ref audio (baseline)
-        if s["fr_text"]:
-            try:
-                wav = model.generate(text=s["fr_text"], reference_wav_path=s["ref_path"])
-                out = os.path.join(OUTPUT_DIR, f"voxcpm_normal_fr_{s['idx']:03d}.wav")
-                sf.write(out, wav, sr)
-                print(f"  ✅ Normal (FR text): {out}")
-                print(f"     Text given: {s['fr_text'][:80]}")
-            except Exception as e:
-                print(f"  ❌ Normal failed: {e}")
+        print(f"\n  Sample {s['idx']}:")
 
-        # Test B: EN text + ref audio — does it just read English?
-        if s["en_text"]:
-            try:
-                wav = model.generate(text=s["en_text"], reference_wav_path=s["ref_path"])
-                out = os.path.join(OUTPUT_DIR, f"voxcpm_en_text_{s['idx']:03d}.wav")
-                sf.write(out, wav, sr)
-                print(f"  ✅ EN text (auto-detect): {out}")
-                print(f"     Text given: {s['en_text'][:80]}")
-                print(f"     → VoxCPM2 auto-detects language. Should speak English.")
-            except Exception as e:
-                print(f"  ❌ EN text failed: {e}")
+        # Attempt 1: prompt_text=en_text, text="" (empty)
+        print("  → Attempt 1: prompt_text=EN, text='' (empty)")
+        try:
+            wav = model.generate(
+                text="",
+                reference_wav_path=s["ref_path"],
+                prompt_text=s["en_text"]
+            )
+            out = os.path.join(OUTPUT_DIR, f"voxcpm_reftext_empty_{s['idx']:03d}.wav")
+            sf.write(out, wav, sr)
+            print(f"    ✅ Generated: {out}")
+        except Exception as e:
+            print(f"    ❌ Failed: {e}")
 
-        print()
+        # Attempt 2: prompt_text=en_text, text=en_text (same text as ref)
+        print("  → Attempt 2: prompt_text=EN, text=EN (repeat same text)")
+        try:
+            wav = model.generate(
+                text=s["en_text"],
+                reference_wav_path=s["ref_path"],
+                prompt_text=s["en_text"]
+            )
+            out = os.path.join(OUTPUT_DIR, f"voxcpm_reftext_repeat_{s['idx']:03d}.wav")
+            sf.write(out, wav, sr)
+            print(f"    ✅ Generated: {out}")
+            print(f"       → Should sound like the original speaker repeating themselves")
+        except Exception as e:
+            print(f"    ❌ Failed: {e}")
+
+        # Attempt 3: prompt_text=en_text, text=" " (single space)
+        print("  → Attempt 3: prompt_text=EN, text=' ' (space)")
+        try:
+            wav = model.generate(
+                text=" ",
+                reference_wav_path=s["ref_path"],
+                prompt_text=s["en_text"]
+            )
+            out = os.path.join(OUTPUT_DIR, f"voxcpm_reftext_space_{s['idx']:03d}.wav")
+            sf.write(out, wav, sr)
+            print(f"    ✅ Generated: {out}")
+        except Exception as e:
+            print(f"    ❌ Failed: {e}")
 
     del model; gc.collect(); torch.cuda.empty_cache()
+    print()
 
 
 # ════════════════════════════════════════════════════════════════════
-# TEST: OmniVoice
+# TEST 2: OmniVoice — ref_audio + ref_text ONLY, no target text
 # ════════════════════════════════════════════════════════════════════
 def test_omnivoice():
     print("=" * 60)
-    print("  TEST: OmniVoice")
+    print("  TEST: OmniVoice — ref_text only, NO target text")
     print("=" * 60)
     try:
         from omnivoice import OmniVoice
@@ -152,41 +141,46 @@ def test_omnivoice():
         return
 
     for s in samples:
-        if s["fr_text"]:
-            try:
-                audio = model.generate(text=s["fr_text"], ref_audio=s["ref_path"])
-                out = os.path.join(OUTPUT_DIR, f"omnivoice_normal_fr_{s['idx']:03d}.wav")
-                torchaudio.save(out, audio[0].cpu(), 24000)
-                print(f"  ✅ Normal (FR text): {out}")
-            except Exception as e:
-                print(f"  ❌ Normal failed: {e}")
+        print(f"\n  Sample {s['idx']}:")
 
-        if s["en_text"]:
-            try:
-                audio = model.generate(text=s["en_text"], ref_audio=s["ref_path"])
-                out = os.path.join(OUTPUT_DIR, f"omnivoice_en_text_{s['idx']:03d}.wav")
-                torchaudio.save(out, audio[0].cpu(), 24000)
-                print(f"  ✅ EN text (no translate): {out}")
-            except Exception as e:
-                print(f"  ❌ EN text failed: {e}")
+        # Attempt 1: ref_text=en_text, text="" (empty)
+        print("  → Attempt 1: ref_text=EN, text='' (empty)")
+        try:
+            audio = model.generate(
+                text="",
+                ref_audio=s["ref_path"],
+                ref_text=s["en_text"]
+            )
+            out = os.path.join(OUTPUT_DIR, f"omnivoice_reftext_empty_{s['idx']:03d}.wav")
+            torchaudio.save(out, audio[0].cpu(), 24000)
+            print(f"    ✅ Generated: {out}")
+        except Exception as e:
+            print(f"    ❌ Failed: {e}")
 
-        print()
+        # Attempt 2: ref_text=en_text, text=en_text (repeat)
+        print("  → Attempt 2: ref_text=EN, text=EN (repeat)")
+        try:
+            audio = model.generate(
+                text=s["en_text"],
+                ref_audio=s["ref_path"],
+                ref_text=s["en_text"]
+            )
+            out = os.path.join(OUTPUT_DIR, f"omnivoice_reftext_repeat_{s['idx']:03d}.wav")
+            torchaudio.save(out, audio[0].cpu(), 24000)
+            print(f"    ✅ Generated: {out}")
+        except Exception as e:
+            print(f"    ❌ Failed: {e}")
 
     del model; gc.collect(); torch.cuda.empty_cache()
+    print()
 
 
-# ════════════════════════════════════════════════════════════════════
-# RUN TESTS
 # ════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    print("\n🧪 S2ST EXPERIMENT: Can voice cloning models translate?\n")
-    print("Each model gets the SAME English reference audio.")
-    print("We test: (A) normal FR text, (B) EN text to see if it translates.\n")
+    print("\n🧪 S2ST EXPERIMENT v2: ref_text only, NO target text\n")
+    print("Goal: see if models generate anything from just ref_audio + ref_text\n")
 
-    # Run VoxCPM2 first (it works), then OmniVoice
     test_voxcpm()
     test_omnivoice()
 
-    print("🎉 Experiment complete!")
-    print(f"   Listen to outputs in: {OUTPUT_DIR}/")
-    print("   Compare *_normal_fr_* (baseline) vs *_en_text_* (translation test)")
+    print("🎉 Done! Check outputs in:", OUTPUT_DIR)
