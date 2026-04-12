@@ -261,6 +261,19 @@ def main():
 
             elif model_name == "qwen3":
                 try:
+                    # Monkey-patch check_model_inputs to support both
+                    # @check_model_inputs and @check_model_inputs() syntax
+                    import transformers.modeling_utils as _tmu
+                    if hasattr(_tmu, 'check_model_inputs'):
+                        _orig_cmi = _tmu.check_model_inputs
+                        def _patched_cmi(*args, **kwargs):
+                            if len(args) == 1 and callable(args[0]) and not kwargs:
+                                return _orig_cmi(args[0])
+                            def wrapper(func):
+                                return _orig_cmi(func)
+                            return wrapper
+                        _tmu.check_model_inputs = _patched_cmi
+
                     from qwen_tts import Qwen3TTSModel
                     try:
                         import flash_attn
