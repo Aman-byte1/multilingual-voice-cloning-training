@@ -41,6 +41,9 @@ os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
 
 sys.path.insert(0, os.path.dirname(__file__))
 torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 warnings.filterwarnings("ignore")
 
 # ===================================================================
@@ -244,7 +247,7 @@ def main():
 
                 from omnivoice import OmniVoice
                 model = OmniVoice.from_pretrained(
-                    "k2-fsa/OmniVoice", device_map=f"{device}:0", dtype=torch.float16)
+                    "k2-fsa/OmniVoice", device_map=f"{device}:0", dtype=torch.float32)
 
                 for entry in tqdm(manifest, desc=f"  {model_name}"):
                     syn_path = os.path.join(out_dir, f"synth_{entry['idx']:05d}.wav")
@@ -303,7 +306,7 @@ def main():
                     model = Qwen3TTSModel.from_pretrained(
                         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
                         device_map=device,
-                        dtype=torch.float16,
+                        dtype=torch.float32,
                         attn_implementation=attn_impl,
                     )
                 except Exception as qwen_err:
@@ -312,7 +315,7 @@ def main():
                     model = AutoModelForCausalLM.from_pretrained(
                         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
                         device_map="auto",
-                        torch_dtype=torch.float16,
+                        torch_dtype=torch.float32,
                         trust_remote_code=True)
 
                 for entry in tqdm(manifest, desc=f"  {model_name}"):
