@@ -41,13 +41,23 @@ echo "📦 STEP 1: Installing dependencies..."
 
 pip install --upgrade pip
 
-# Core TTS models
+# Install OmniVoice FIRST — it pins the correct transformers version
 pip install omnivoice
-pip install voxcpm
-pip install chatterbox-tts
 
-# Qwen3-TTS
-pip install transformers>=4.45 accelerate
+# Record the transformers version omnivoice needs
+TF_VER=$(python3 -c "import transformers; print(transformers.__version__)")
+echo "   OmniVoice installed with transformers==${TF_VER}"
+
+# Install other TTS models WITHOUT upgrading transformers
+pip install voxcpm --no-deps 2>/dev/null || pip install voxcpm
+pip install chatterbox-tts --no-deps 2>/dev/null || pip install chatterbox-tts
+
+# Qwen3-TTS — use qwen-tts library
+pip install qwen-tts 2>/dev/null || echo "   qwen-tts not available, will try transformers fallback"
+pip install accelerate
+
+# Re-pin transformers to the version omnivoice needs
+pip install "transformers==${TF_VER}"
 
 # Evaluation + scoring
 pip install faster-whisper jiwer speechbrain torchaudio soundfile
@@ -56,7 +66,22 @@ pip install faster-whisper jiwer speechbrain torchaudio soundfile
 pip install datasets huggingface_hub
 
 # OmniVoice training deps
-pip install "omnivoice[train]" 2>/dev/null || pip install omnivoice webdataset
+pip install "omnivoice[train]" 2>/dev/null || pip install webdataset
+
+# Verify critical imports
+python3 -c "
+import omnivoice; print(f'   ✅ omnivoice {omnivoice.__version__}')
+import transformers; print(f'   ✅ transformers {transformers.__version__}')
+try:
+    import voxcpm; print('   ✅ voxcpm')
+except: print('   ⚠ voxcpm not available')
+try:
+    import chatterbox; print('   ✅ chatterbox')
+except: print('   ⚠ chatterbox not available')
+try:
+    import qwen_tts; print('   ✅ qwen_tts')
+except: print('   ⚠ qwen_tts not available (will use transformers)')
+"
 
 echo "   ✅ All dependencies installed"
 

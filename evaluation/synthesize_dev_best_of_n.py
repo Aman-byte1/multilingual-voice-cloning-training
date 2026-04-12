@@ -114,15 +114,25 @@ def generate_voxcpm(model, text, ref_path):
     return np.asarray(wav, dtype=np.float32), sr
 
 
-def generate_qwen3(model, tokenizer, text, ref_path, lang):
+def generate_qwen3(model, text, ref_path, ref_text, lang):
     LANG_MAP = {"fr": "French", "zh": "Chinese", "de": "German"}
     lang_name = LANG_MAP.get(lang, "French")
-    prompt = f"<|task|>voice_cloning<|lang|>{lang_name}<|ref_audio|>{ref_path}<|text|>{text}"
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_new_tokens=2048)
-    audio = outputs.audio[0].cpu().numpy()
-    return audio, 24000
+    try:
+        wav = model.generate(
+            text=text,
+            ref_audio=ref_path,
+            ref_text=ref_text,
+            language=lang_name,
+        )
+        if hasattr(wav, 'cpu'):
+            return wav.cpu().numpy().squeeze(), 24000
+        return np.asarray(wav, dtype=np.float32), 24000
+    except Exception:
+        # Fallback: try without ref_text
+        wav = model.generate(text=text, ref_audio=ref_path, language=lang_name)
+        if hasattr(wav, 'cpu'):
+            return wav.cpu().numpy().squeeze(), 24000
+        return np.asarray(wav, dtype=np.float32), 24000
 
 
 def generate_chatterbox(model, text, ref_path):
@@ -250,11 +260,26 @@ def main():
                 del model; gc.collect(); torch.cuda.empty_cache()
 
             elif model_name == "qwen3":
-                from transformers import AutoModelForCausalLM, AutoTokenizer
-                tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-TTS", trust_remote_code=True)
-                model = AutoModelForCausalLM.from_pretrained(
-                    "Qwen/Qwen3-TTS", device_map="auto",
-                    torch_dtype=torch.float16, trust_remote_code=True)
+                try:
+                    from qwen_tts import Qwen3TTSModel
+                    try:
+                        import flash_attn
+                        attn_impl = "flash_attention_2"
+                    except ImportError:
+                        attn_impl = "sdpa"
+                    model = Qwen3TTSModel.from_pretrained(
+                        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+                        device_map=device,
+                        dtype=torch.float16,
+                        attn_implementation=attn_impl,
+                    )
+                except ImportError:
+                    from transformers import AutoModelForCausalLM
+                    model = AutoModelForCausalLM.from_pretrained(
+                        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+                        device_map="auto",
+                        torch_dtype=torch.float16,
+                        trust_remote_code=True)
 
                 for entry in tqdm(manifest, desc=f"  {model_name}"):
                     syn_path = os.path.join(out_dir, f"synth_{entry['idx']:05d}.wav")
@@ -262,14 +287,16 @@ def main():
                         all_outputs[model_name][entry["idx"]] = syn_path
                         continue
                     try:
-                        wav, sr = generate_qwen3(model, tokenizer, entry["text_target"],
-                                                 entry["ref_path"], lang)
+                        wav, sr = generate_qwen3(model, entry["text_target"],
+                                                 entry["ref_path"],
+                                                 entry.get("ref_en_text", ""),
+                                                 lang)
                         save_wav(wav, sr, syn_path)
                         all_outputs[model_name][entry["idx"]] = syn_path
                     except Exception as e:
                         print(f"   ⚠ {model_name} sample {entry['idx']}: {e}")
 
-                del model, tokenizer; gc.collect(); torch.cuda.empty_cache()
+                del model; gc.collect(); torch.cuda.empty_cache()
 
             elif model_name == "chatterbox":
                 from chatterbox.tts import ChatterboxTTS
