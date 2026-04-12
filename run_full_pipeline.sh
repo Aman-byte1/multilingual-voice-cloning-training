@@ -45,13 +45,17 @@ pip install --upgrade pip
 apt-get update -qq && apt-get install -y -qq sox ffmpeg > /dev/null 2>&1 || echo "   ⚠ Could not install sox/ffmpeg (non-root?)"
 
 # Install OmniVoice FIRST — it pins the correct transformers version
-pip install omnivoice
+pip install omnivoice datasets==2.20.0
 
 # Record the transformers version omnivoice needs
 TF_VER=$(python3 -c "import transformers; print(transformers.__version__)")
 echo "   OmniVoice installed with transformers==${TF_VER}"
 
+# Pre-install numpy and build deps for pkuseg (chatterbox dependency)
+pip install "numpy<1.26" cython setuptools wheel
+
 # Install other TTS models WITHOUT upgrading transformers
+pip install perth pkuseg --no-build-isolation
 pip install voxcpm --no-deps 2>/dev/null || pip install voxcpm
 pip install chatterbox-tts --no-deps 2>/dev/null || pip install chatterbox-tts
 
