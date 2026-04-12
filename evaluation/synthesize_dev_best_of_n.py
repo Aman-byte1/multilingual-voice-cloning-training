@@ -338,6 +338,14 @@ def main():
                         qcfg.Qwen3TTSTalkerConfig.pad_token_id = None
                     except Exception:
                         pass
+                        
+                    # Monkey-patch ROPE_INIT_FUNCTIONS missing 'default' in transformers 5.5
+                    try:
+                        import transformers.modeling_rope_utils as _rope_utils
+                        if "default" not in _rope_utils.ROPE_INIT_FUNCTIONS:
+                            _rope_utils.ROPE_INIT_FUNCTIONS["default"] = _rope_utils.ROPE_INIT_FUNCTIONS.get("linear", list(_rope_utils.ROPE_INIT_FUNCTIONS.values())[0])
+                    except Exception:
+                        pass
 
                     from qwen_tts import Qwen3TTSModel
                     try:
