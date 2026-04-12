@@ -55,7 +55,7 @@ echo "   OmniVoice installed with transformers==${TF_VER}"
 pip install "numpy<1.26" cython setuptools wheel
 
 # Install other TTS models WITHOUT upgrading transformers
-pip install perth pkuseg --no-build-isolation
+pip install perth pkuseg s3tokenizer --no-build-isolation
 pip install voxcpm --no-deps 2>/dev/null || pip install voxcpm
 pip install chatterbox-tts --no-deps 2>/dev/null || pip install chatterbox-tts
 
@@ -75,7 +75,20 @@ pip install datasets huggingface_hub
 # OmniVoice training deps
 pip install "omnivoice[train]" 2>/dev/null || pip install webdataset
 
+# ---------------------------------------------------------------
+# STEP 1.5: Fix Python compatibility issues in third-party libraries
+# ---------------------------------------------------------------
+# Fix qwen_tts compatibility with transformers 5.x
+# (check_model_inputs changed from decorator factory to plain decorator)
+QWEN_TTS_FILE=$(python3 -c "import site, os; print(os.path.join(site.getsitepackages()[0], 'qwen_tts/core/tokenizer_12hz/modeling_qwen3_tts_tokenizer_v2.py'))" 2>/dev/null || echo "")
+if [ -n "${QWEN_TTS_FILE}" ] && [ -f "${QWEN_TTS_FILE}" ]; then
+    sed -i 's/@check_model_inputs()/@check_model_inputs/g' "${QWEN_TTS_FILE}"
+    echo "   🔧 Patched qwen_tts for transformers compat"
+fi
+
+# ---------------------------------------------------------------
 # Verify critical imports
+# ---------------------------------------------------------------
 python3 -c "
 import omnivoice; print(f'   ✅ omnivoice {omnivoice.__version__}')
 import transformers; print(f'   ✅ transformers {transformers.__version__}')
@@ -83,19 +96,12 @@ try:
     import voxcpm; print('   ✅ voxcpm')
 except: print('   ⚠ voxcpm not available')
 try:
-    import chatterbox; print('   ✅ chatterbox')
-except: print('   ⚠ chatterbox not available')
+    from chatterbox.tts import ChatterboxTTS; print('   ✅ chatterbox')
+except Exception as e: print(f'   ⚠ chatterbox failed: {e}')
 try:
     import qwen_tts; print('   ✅ qwen_tts')
-except: print('   ⚠ qwen_tts not available (will use transformers)')
+except Exception as e: print(f'   ⚠ qwen_tts failed: {e}')
 "
-# Fix qwen_tts compatibility with transformers 5.x
-# (check_model_inputs changed from decorator factory to plain decorator)
-QWEN_TTS_FILE=$(python3 -c "import qwen_tts; import os; print(os.path.join(os.path.dirname(qwen_tts.__file__), 'core/tokenizer_12hz/modeling_qwen3_tts_tokenizer_v2.py'))" 2>/dev/null || echo "")
-if [ -n "${QWEN_TTS_FILE}" ] && [ -f "${QWEN_TTS_FILE}" ]; then
-    sed -i 's/@check_model_inputs()/@check_model_inputs/g' "${QWEN_TTS_FILE}"
-    echo "   🔧 Patched qwen_tts for transformers compat"
-fi
 
 echo "   ✅ All dependencies installed"
 
