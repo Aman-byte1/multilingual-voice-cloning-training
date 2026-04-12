@@ -130,46 +130,68 @@ def generate_voxcpm(model, text, ref_path):
     return np.asarray(wav, dtype=np.float32), sr
 
 
+def _resample_ref_to_24k(ref_path):
+    """Resample reference audio to 24kHz (required by Qwen3-TTS codec).
+    Returns path to a temp 24kHz WAV file."""
+    import tempfile
+    wav, sr = torchaudio.load(ref_path)
+    if sr == 24000:
+        return ref_path  # already correct
+    wav_24k = torchaudio.functional.resample(wav, sr, 24000)
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="qwen3_ref_24k_")
+    os.close(fd)
+    torchaudio.save(tmp_path, wav_24k, 24000)
+    return tmp_path
+
+
 def generate_qwen3(model, text, ref_path, ref_text, lang):
     LANG_MAP = {"fr": "French", "zh": "Chinese", "de": "German"}
     lang_name = LANG_MAP.get(lang, "French")
     
-    if hasattr(model, 'generate_voice_clone'):
-        wavs, sr = model.generate_voice_clone(
-            text=text,
-            language=lang_name,
-            ref_audio=ref_path,
-            ref_text=ref_text if ref_text and str(ref_text).strip() else " ",
-            use_cache=False,
-        )
-        wav = wavs[0] if isinstance(wavs, list) else wavs
-        if torch.is_tensor(wav):
-            wav = wav.cpu().numpy()
-        return np.asarray(wav, dtype=np.float32).squeeze(), int(sr)
-    else:
-        try:
-            res = model.generate(
+    # Qwen3-TTS codec expects 24kHz; resample if needed
+    ref_24k = _resample_ref_to_24k(ref_path)
+    cleanup_ref = ref_24k != ref_path  # only delete if we created a temp file
+    
+    try:
+        if hasattr(model, 'generate_voice_clone'):
+            wavs, sr = model.generate_voice_clone(
                 text=text,
-                ref_audio=ref_path,
-                ref_text=ref_text,
                 language=lang_name,
+                ref_audio=ref_24k,
+                ref_text=ref_text if ref_text and str(ref_text).strip() else " ",
+                use_cache=False,
             )
-        except Exception:
-            res = model.generate(text=text, ref_audio=ref_path, language=lang_name)
-            
-        if isinstance(res, tuple):
-            wav = res[0]
-            sr = res[1] if len(res) > 1 else 24000
+            wav = wavs[0] if isinstance(wavs, list) else wavs
+            if torch.is_tensor(wav):
+                wav = wav.cpu().numpy()
+            return np.asarray(wav, dtype=np.float32).squeeze(), int(sr)
         else:
-            wav, sr = res, 24000
-            
-        if isinstance(wav, list):
-            wav = wav[0]
-            
-        if torch.is_tensor(wav):
-            wav = wav.cpu().numpy()
-            
-        return np.asarray(wav, dtype=np.float32).squeeze(), int(sr)
+            try:
+                res = model.generate(
+                    text=text,
+                    ref_audio=ref_24k,
+                    ref_text=ref_text,
+                    language=lang_name,
+                )
+            except Exception:
+                res = model.generate(text=text, ref_audio=ref_24k, language=lang_name)
+                
+            if isinstance(res, tuple):
+                wav = res[0]
+                sr = res[1] if len(res) > 1 else 24000
+            else:
+                wav, sr = res, 24000
+                
+            if isinstance(wav, list):
+                wav = wav[0]
+                
+            if torch.is_tensor(wav):
+                wav = wav.cpu().numpy()
+                
+            return np.asarray(wav, dtype=np.float32).squeeze(), int(sr)
+    finally:
+        if cleanup_ref and os.path.exists(ref_24k):
+            os.remove(ref_24k)
 
 
 def generate_chatterbox(model, text, ref_path):
