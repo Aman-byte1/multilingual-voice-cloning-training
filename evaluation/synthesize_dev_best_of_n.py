@@ -297,7 +297,6 @@ def main():
 
             elif model_name == "voxcpm":
                 from voxcpm import VoxCPM
-                import soundfile as sf
                 model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
 
                 for entry in tqdm(manifest, desc=f"  {model_name}"):
