@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-HF_TOKEN="${HF_TOKEN:-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}"
+HF_TOKEN="${HF_TOKEN:?ERROR: Set HF_TOKEN env var first — export HF_TOKEN=hf_xxx}"
 HF_REPO_DATASET="Aman-byte1/omnivoice-best-of-n-training"
 HF_REPO_MODEL="Aman-byte1/omnivoice-finetuned-iwslt2026"
 WORKDIR="/workspace/multilingual-voice-cloning-training"
