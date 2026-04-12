@@ -43,7 +43,7 @@ warnings.filterwarnings("ignore")
 # ===================================================================
 MODELS_PER_LANG = {
     "fr": ["omnivoice", "qwen3", "chatterbox"],
-    "ar": ["omnivoice", "chatterbox", "voxcpm"],
+    "ar": ["omnivoice", "chatterbox", "voxcpm"],  # Qwen3 doesn't support Arabic
     "zh": ["omnivoice", "voxcpm", "qwen3"],
 }
 
@@ -273,7 +273,8 @@ def main():
                         dtype=torch.float16,
                         attn_implementation=attn_impl,
                     )
-                except ImportError:
+                except Exception as qwen_err:
+                    print(f"   qwen_tts library failed ({qwen_err}), trying transformers...")
                     from transformers import AutoModelForCausalLM
                     model = AutoModelForCausalLM.from_pretrained(
                         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",

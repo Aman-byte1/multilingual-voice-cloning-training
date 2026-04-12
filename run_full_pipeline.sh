@@ -41,6 +41,9 @@ echo "📦 STEP 1: Installing dependencies..."
 
 pip install --upgrade pip
 
+# System deps (sox for Qwen3-TTS, ffmpeg for audio processing)
+apt-get update -qq && apt-get install -y -qq sox ffmpeg > /dev/null 2>&1 || echo "   ⚠ Could not install sox/ffmpeg (non-root?)"
+
 # Install OmniVoice FIRST — it pins the correct transformers version
 pip install omnivoice
 
