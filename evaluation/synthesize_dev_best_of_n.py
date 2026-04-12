@@ -139,7 +139,8 @@ def generate_qwen3(model, text, ref_path, ref_text, lang):
             text=text,
             language=lang_name,
             ref_audio=ref_path,
-            ref_text=ref_text,
+            ref_text=ref_text if ref_text and str(ref_text).strip() else None,
+            x_vector_only_mode=not bool(ref_text and str(ref_text).strip()),
         )
         wav = wavs[0] if isinstance(wavs, list) else wavs
         if torch.is_tensor(wav):
