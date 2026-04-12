@@ -118,15 +118,23 @@ for lang in fr ar zh; do
         --output-dir ./dev_synth \
         --cache-dir ./data_cache \
         --hf-token "${HF_TOKEN}"
+
+    # Upload this language's results immediately
+    echo "  📤 Uploading ${lang} results to HuggingFace..."
+    python evaluation/upload_best_of_n_dataset.py \
+        --dev-synth-dir ./dev_synth \
+        --repo-id "${HF_REPO_DATASET}" \
+        --hf-token "${HF_TOKEN}" 2>/dev/null || echo "  ⚠ Upload for ${lang} had warnings (non-fatal)"
+    echo "  ✅ ${lang} done and uploaded"
 done
 
-echo "   ✅ All 3 languages synthesized"
+echo "   ✅ All 3 languages synthesized and uploaded"
 
 # ---------------------------------------------------------------
-# STEP 4: Upload curated dataset to HuggingFace
+# STEP 4: Final dataset upload (merged manifest)
 # ---------------------------------------------------------------
 echo ""
-echo "📤 STEP 4: Uploading dataset to HuggingFace..."
+echo "📤 STEP 4: Final dataset upload (merged train_all.jsonl)..."
 
 python evaluation/upload_best_of_n_dataset.py \
     --dev-synth-dir ./dev_synth \
