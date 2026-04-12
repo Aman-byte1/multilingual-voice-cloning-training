@@ -139,8 +139,7 @@ def generate_qwen3(model, text, ref_path, ref_text, lang):
             text=text,
             language=lang_name,
             ref_audio=ref_path,
-            ref_text=ref_text if ref_text and str(ref_text).strip() else None,
-            x_vector_only_mode=not bool(ref_text and str(ref_text).strip()),
+            ref_text=ref_text if ref_text and str(ref_text).strip() else " ",
         )
         wav = wavs[0] if isinstance(wavs, list) else wavs
         if torch.is_tensor(wav):
@@ -229,20 +228,22 @@ def main():
     for i in range(total):
         row = ds[i]
         text_target = (row.get(f"text_{lang}") or "").strip()
+        ref_text = (row.get("text_en") or row.get("ref_en_text") or text_target).strip()
         ref_data = row.get("audio")
         if not ref_data or not text_target:
             continue
         ref_path = os.path.join(ref_dir, f"ref_{i:05d}.wav")
-        raw_rows.append((i, text_target, ref_data, ref_path))
+        raw_rows.append((i, text_target, ref_data, ref_path, ref_text))
 
     # Parallel WAV extraction (I/O bound, so threads work great)
     def _extract_one(args_tuple):
-        i, text_target, ref_data, ref_path = args_tuple
+        i, text_target, ref_data, ref_path, ref_text = args_tuple
         if not os.path.exists(ref_path):
             wav = np.asarray(ref_data["array"], dtype=np.float32)
             sf.write(ref_path, wav, ref_data["sampling_rate"])
         return {"idx": i, "text_target": text_target,
-                "ref_path": ref_path, "ref_sr": ref_data["sampling_rate"]}
+                "ref_path": ref_path, "ref_sr": ref_data["sampling_rate"],
+                "ref_en_text": ref_text}
 
     manifest = []
     with ThreadPoolExecutor(max_workers=8) as pool:
