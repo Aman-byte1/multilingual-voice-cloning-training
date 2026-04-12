@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""
+Best-of-N Synthesis Pipeline for OmniVoice Fine-tuning
+=======================================================
+1) Synthesize dev set with top 3 models per language
+2) Score each output (CER + speaker similarity)
+3) Select best model per sentence
+4) Build JSONL training manifest for OmniVoice fine-tuning
+
+Top 3 models per language (by combined score from eval):
+  FR: OmniVoice, Qwen3, Chatterbox
+  AR: OmniVoice, Chatterbox, VoxCPM2  (Qwen3 no AR support)
+  ZH: OmniVoice, VoxCPM2, Qwen3       (Chatterbox no ZH support)
+
+Usage:
+  python evaluation/synthesize_dev_best_of_n.py --lang fr
+  python evaluation/synthesize_dev_best_of_n.py --lang ar
+  python evaluation/synthesize_dev_best_of_n.py --lang zh
+"""
+
+import os
+import sys
+import gc
+import csv
+import json
+import time
+import argparse
+import warnings
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchaudio
+from tqdm import tqdm
+from datasets import load_dataset
+from huggingface_hub import login
+
+sys.path.insert(0, os.path.dirname(__file__))
+torch.set_float32_matmul_precision("high")
+warnings.filterwarnings("ignore")
+
+# ===================================================================
+# Model configurations per language (top 3)
+# ===================================================================
+MODELS_PER_LANG = {
+    "fr": ["omnivoice", "qwen3", "chatterbox"],
+    "ar": ["omnivoice", "chatterbox", "voxcpm"],
+    "zh": ["omnivoice", "voxcpm", "qwen3"],
+}
+
+# ===================================================================
+# Helper functions
+# ===================================================================
+
+def save_wav(audio_array, sr, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    wav_t = torch.from_numpy(np.asarray(audio_array, dtype=np.float32))
+    if wav_t.dim() == 1:
+        wav_t = wav_t.unsqueeze(0)
+    torchaudio.save(path, wav_t, sr)
+
+
+def load_speaker_model(device="cuda"):
+    from speechbrain.inference.speaker import SpeakerRecognition
+    return SpeakerRecognition.from_hparams(
+        source="speechbrain/spkrec-ecapa-voxceleb",
+        savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
+        run_opts={"device": device}
+    )
+
+
+def extract_speaker_embedding(wav_path, model, device="cuda"):
+    try:
+        wav, sr = torchaudio.load(wav_path)
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+        wav = wav.squeeze(0).to(device)
+        emb = model.encode_batch(wav.unsqueeze(0))
+        return emb.squeeze(0).squeeze(0).detach()
+    except Exception:
+        return None
+
+
+def compute_cer(ref_text, hyp_text, lang):
+    import jiwer
+    if lang in ("zh", "ar", "ja", "ko"):
+        transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
+    else:
+        transforms = jiwer.Compose([
+            jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(),
+            jiwer.Strip(), jiwer.RemovePunctuation()
+        ])
+    try:
+        ref_clean = transforms(ref_text)
+        hyp_clean = transforms(hyp_text)
+        if not ref_clean.strip():
+            return 1.0
+        return float(jiwer.cer(ref_clean, hyp_clean))
+    except Exception:
+        return 1.0
+
+
+# ===================================================================
+# Model loaders and generators
+# ===================================================================
+
+def generate_omnivoice(model, text, ref_path):
+    audio = model.generate(text=text, ref_audio=ref_path)
+    return audio[0].cpu().numpy().squeeze(), 24000
+
+
+def generate_voxcpm(model, text, ref_path):
+    wav = model.generate(text=text, reference_wav_path=ref_path)
+    sr = model.tts_model.sample_rate
+    return np.asarray(wav, dtype=np.float32), sr
+
+
+def generate_qwen3(model, tokenizer, text, ref_path, lang):
+    LANG_MAP = {"fr": "French", "zh": "Chinese", "de": "German"}
+    lang_name = LANG_MAP.get(lang, "French")
+    prompt = f"<|task|>voice_cloning<|lang|>{lang_name}<|ref_audio|>{ref_path}<|text|>{text}"
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_new_tokens=2048)
+    audio = outputs.audio[0].cpu().numpy()
+    return audio, 24000
+
+
+def generate_chatterbox(model, text, ref_path):
+    wav = model.generate(text=text, audio_prompt_path=ref_path)
+    return wav.cpu().numpy().squeeze(), 24000
+
+
+# ===================================================================
+# Main Pipeline
+# ===================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Best-of-N Synthesis for OmniVoice Fine-tuning")
+    parser.add_argument("--lang", required=True, choices=["fr", "ar", "zh"])
+    parser.add_argument("--dataset", default="ymoslem/acl-6060")
+    parser.add_argument("--split", default="dev")
+    parser.add_argument("--output-dir", default="./dev_synth")
+    parser.add_argument("--cache-dir", default="./data_cache")
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--whisper-model", default="large-v3")
+    parser.add_argument("--hf-token", default=None)
+    args = parser.parse_args()
+
+    if args.hf_token:
+        login(token=args.hf_token)
+    elif os.environ.get("HF_TOKEN"):
+        login(token=os.environ["HF_TOKEN"])
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    lang = args.lang
+    models_to_run = MODELS_PER_LANG[lang]
+
+    print("=" * 64)
+    print(f"  BEST-OF-N SYNTHESIS ({lang})")
+    print(f"  Models: {', '.join(models_to_run)}")
+    print("=" * 64)
+
+    # ---------------------------------------------------------------
+    # Phase 1: Extract dataset
+    # ---------------------------------------------------------------
+    print(f"\n📥 Phase 1: Extracting dev set")
+    ds = load_dataset(args.dataset, split=args.split, cache_dir=args.cache_dir)
+    total = len(ds)
+    if args.max_samples and args.max_samples < total:
+        step = max(1, total // args.max_samples)
+        indices = list(range(0, total, step))[:args.max_samples]
+        ds = ds.select(indices)
+    total = len(ds)
+    print(f"   Samples: {total}")
+
+    ref_dir = os.path.join(args.output_dir, "ref_audio")
+    os.makedirs(ref_dir, exist_ok=True)
+
+    manifest = []
+    for i in tqdm(range(total), desc="Extracting"):
+        row = ds[i]
+        text_target = (row.get(f"text_{lang}") or "").strip()
+        ref_data = row.get("audio")
+
+        if not ref_data or not text_target:
+            continue
+
+        ref_path = os.path.join(ref_dir, f"ref_{i:05d}.wav")
+        if not os.path.exists(ref_path):
+            save_wav(ref_data["array"], ref_data["sampling_rate"], ref_path)
+
+        manifest.append({
+            "idx": i,
+            "text_target": text_target,
+            "ref_path": ref_path,
+            "ref_sr": ref_data["sampling_rate"],
+        })
+
+    del ds; gc.collect()
+    print(f"   Extracted {len(manifest)} samples.")
+
+    # ---------------------------------------------------------------
+    # Phase 2: Synthesize with each model
+    # ---------------------------------------------------------------
+    all_outputs = {}  # model_name -> {idx: wav_path}
+
+    for model_name in models_to_run:
+        print(f"\n🎙  Phase 2: Generating with {model_name}")
+        out_dir = os.path.join(args.output_dir, model_name, lang)
+        os.makedirs(out_dir, exist_ok=True)
+        all_outputs[model_name] = {}
+
+        try:
+            if model_name == "omnivoice":
+                from omnivoice import OmniVoice
+                model = OmniVoice.from_pretrained(
+                    "k2-fsa/OmniVoice", device_map=f"{device}:0", dtype=torch.float16)
+
+                for entry in tqdm(manifest, desc=f"  {model_name}"):
+                    syn_path = os.path.join(out_dir, f"synth_{entry['idx']:05d}.wav")
+                    if os.path.exists(syn_path):
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                        continue
+                    try:
+                        wav, sr = generate_omnivoice(model, entry["text_target"], entry["ref_path"])
+                        save_wav(wav, sr, syn_path)
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                    except Exception as e:
+                        print(f"   ⚠ {model_name} sample {entry['idx']}: {e}")
+
+                del model; gc.collect(); torch.cuda.empty_cache()
+
+            elif model_name == "voxcpm":
+                from voxcpm import VoxCPM
+                import soundfile as sf
+                model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+
+                for entry in tqdm(manifest, desc=f"  {model_name}"):
+                    syn_path = os.path.join(out_dir, f"synth_{entry['idx']:05d}.wav")
+                    if os.path.exists(syn_path):
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                        continue
+                    try:
+                        wav, sr = generate_voxcpm(model, entry["text_target"], entry["ref_path"])
+                        sf.write(syn_path, wav, sr)
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                    except Exception as e:
+                        print(f"   ⚠ {model_name} sample {entry['idx']}: {e}")
+
+                del model; gc.collect(); torch.cuda.empty_cache()
+
+            elif model_name == "qwen3":
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-TTS", trust_remote_code=True)
+                model = AutoModelForCausalLM.from_pretrained(
+                    "Qwen/Qwen3-TTS", device_map="auto",
+                    torch_dtype=torch.float16, trust_remote_code=True)
+
+                for entry in tqdm(manifest, desc=f"  {model_name}"):
+                    syn_path = os.path.join(out_dir, f"synth_{entry['idx']:05d}.wav")
+                    if os.path.exists(syn_path):
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                        continue
+                    try:
+                        wav, sr = generate_qwen3(model, tokenizer, entry["text_target"],
+                                                 entry["ref_path"], lang)
+                        save_wav(wav, sr, syn_path)
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                    except Exception as e:
+                        print(f"   ⚠ {model_name} sample {entry['idx']}: {e}")
+
+                del model, tokenizer; gc.collect(); torch.cuda.empty_cache()
+
+            elif model_name == "chatterbox":
+                from chatterbox.tts import ChatterboxTTS
+                model = ChatterboxTTS.from_pretrained(device=device)
+
+                for entry in tqdm(manifest, desc=f"  {model_name}"):
+                    syn_path = os.path.join(out_dir, f"synth_{entry['idx']:05d}.wav")
+                    if os.path.exists(syn_path):
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                        continue
+                    try:
+                        wav, sr = generate_chatterbox(model, entry["text_target"], entry["ref_path"])
+                        save_wav(wav, sr, syn_path)
+                        all_outputs[model_name][entry["idx"]] = syn_path
+                    except Exception as e:
+                        print(f"   ⚠ {model_name} sample {entry['idx']}: {e}")
+
+                del model; gc.collect(); torch.cuda.empty_cache()
+
+        except Exception as e:
+            print(f"   ❌ Failed to load {model_name}: {e}")
+            continue
+
+    # ---------------------------------------------------------------
+    # Phase 3: Score all outputs
+    # ---------------------------------------------------------------
+    print(f"\n📊 Phase 3: Scoring outputs")
+
+    # Load ASR
+    from faster_whisper import WhisperModel as FasterWhisperModel
+    whisper = FasterWhisperModel(args.whisper_model, device=device,
+                                compute_type="float16" if device == "cuda" else "int8")
+
+    # Load speaker verifier
+    verifier = load_speaker_model(device=device)
+
+    scores = []  # list of dicts
+    for entry in tqdm(manifest, desc="Scoring"):
+        idx = entry["idx"]
+        ref_emb = extract_speaker_embedding(entry["ref_path"], verifier, device)
+
+        row_scores = {
+            "idx": idx,
+            "lang": lang,
+            "text": entry["text_target"],
+            "ref_path": entry["ref_path"],
+        }
+
+        best_score = -1.0
+        best_model = None
+        best_wav = None
+
+        for model_name in models_to_run:
+            wav_path = all_outputs.get(model_name, {}).get(idx)
+            if not wav_path or not os.path.exists(wav_path):
+                row_scores[f"{model_name}_cer"] = None
+                row_scores[f"{model_name}_sim"] = None
+                row_scores[f"{model_name}_combined"] = None
+                continue
+
+            # Transcribe
+            try:
+                segments, _ = whisper.transcribe(wav_path, language=lang,
+                                                  beam_size=5, vad_filter=True)
+                hyp = " ".join(seg.text for seg in segments).strip()
+            except Exception:
+                hyp = ""
+
+            # CER
+            cer = compute_cer(entry["text_target"], hyp, lang) if hyp else 1.0
+
+            # Speaker similarity
+            syn_emb = extract_speaker_embedding(wav_path, verifier, device)
+            if syn_emb is not None and ref_emb is not None:
+                sim = float(F.cosine_similarity(
+                    syn_emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
+            else:
+                sim = 0.0
+
+            # Combined score: 50% content accuracy + 50% voice similarity
+            combined = 0.5 * (1.0 - min(cer, 1.0)) + 0.5 * max(sim, 0.0)
+
+            row_scores[f"{model_name}_cer"] = cer
+            row_scores[f"{model_name}_sim"] = sim
+            row_scores[f"{model_name}_combined"] = combined
+            row_scores[f"{model_name}_wav"] = wav_path
+
+            if combined > best_score:
+                best_score = combined
+                best_model = model_name
+                best_wav = wav_path
+
+        row_scores["best_model"] = best_model
+        row_scores["best_score"] = best_score
+        row_scores["best_wav"] = best_wav
+        scores.append(row_scores)
+
+    del whisper, verifier; gc.collect(); torch.cuda.empty_cache()
+
+    # ---------------------------------------------------------------
+    # Phase 4: Save scores and build JSONL manifest
+    # ---------------------------------------------------------------
+    print(f"\n📝 Phase 4: Building training manifest")
+
+    # Save scores CSV
+    scores_path = os.path.join(args.output_dir, f"scores_{lang}.csv")
+    fieldnames = list(scores[0].keys()) if scores else []
+    with open(scores_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(scores)
+    print(f"   Scores saved to {scores_path}")
+
+    # Build JSONL for OmniVoice fine-tuning
+    jsonl_path = os.path.join(args.output_dir, f"train_{lang}.jsonl")
+    count = 0
+    model_counts = {}
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        for s in scores:
+            if s["best_wav"] and s["best_model"]:
+                entry = {
+                    "id": f"{lang}_{s['idx']:05d}",
+                    "audio_path": os.path.abspath(s["best_wav"]),
+                    "text": s["text"],
+                    "language_id": lang,
+                }
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                count += 1
+                model_counts[s["best_model"]] = model_counts.get(s["best_model"], 0) + 1
+
+    print(f"   Training JSONL saved to {jsonl_path} ({count} samples)")
+    print(f"   Model selection distribution:")
+    for m, c in sorted(model_counts.items(), key=lambda x: -x[1]):
+        pct = 100 * c / count if count > 0 else 0
+        print(f"     {m}: {c} ({pct:.1f}%)")
+
+    # Summary
+    valid_scores = [s["best_score"] for s in scores if s["best_score"] > 0]
+    if valid_scores:
+        print(f"\n   Average best-of-N combined score: {np.mean(valid_scores):.4f}")
+        print(f"   Min: {np.min(valid_scores):.4f}, Max: {np.max(valid_scores):.4f}")
+
+    print(f"\n✅ Done for {lang}!")
+
+
+if __name__ == "__main__":
+    main()
