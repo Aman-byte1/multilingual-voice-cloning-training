@@ -230,12 +230,12 @@ def main():
                 # Monkey-patch load_audio to use torchaudio instead of torchcodec
                 import omnivoice.utils.audio as _omni_audio
                 def _load_audio_torchaudio(audio_path: str, sampling_rate: int):
-                    wav, sr = torchaudio.load(audio_path)
-                    if wav.shape[0] > 1:
-                        wav = wav.mean(dim=0, keepdim=True)
+                    waveform, sr = torchaudio.load(audio_path, backend="soundfile")
                     if sr != sampling_rate:
-                        wav = torchaudio.functional.resample(wav, sr, sampling_rate)
-                    return wav.squeeze(0)
+                        waveform = torchaudio.functional.resample(waveform, sr, sampling_rate)
+                    if waveform.shape[0] > 1:
+                        waveform = torch.mean(waveform, dim=0, keepdim=True)
+                    return waveform  # shape: (1, T)
                 _omni_audio.load_audio = _load_audio_torchaudio
 
                 # Also patch it in the model module so the already-imported reference updates
