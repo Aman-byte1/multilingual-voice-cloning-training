@@ -85,6 +85,9 @@ def extract_speaker_embedding(wav_path, model, device="cuda"):
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
         wav = wav.squeeze(0).to(device)
+        # Handle ultra-short audio outputs that crash ECAPA-TDNN padding
+        if wav.shape[-1] < 1600:
+            return None
         emb = model.encode_batch(wav.unsqueeze(0))
         return emb.squeeze(0).squeeze(0).detach()
     except Exception:
@@ -327,6 +330,14 @@ def main():
                                 return _orig_cmi(func)
                             return wrapper
                         _tmu.check_model_inputs = _patched_cmi
+
+                    # Monkey-patch Qwen Configs to avoid pad_token_id missing error in transformers 5.5
+                    try:
+                        import qwen_tts.core.models.configuration_qwen3_tts as qcfg
+                        qcfg.Qwen3TTSConfig.pad_token_id = None
+                        qcfg.Qwen3TTSTalkerConfig.pad_token_id = None
+                    except Exception:
+                        pass
 
                     from qwen_tts import Qwen3TTSModel
                     try:
