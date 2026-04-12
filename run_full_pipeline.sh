@@ -55,7 +55,7 @@ echo "   OmniVoice installed with transformers==${TF_VER}"
 pip install "numpy<1.26" cython setuptools wheel
 
 # Install other TTS models WITHOUT upgrading transformers
-pip install perth pkuseg s3tokenizer omegaconf diffusers==0.29.0 gradio==5.44.1 --no-build-isolation
+pip install resemble-perth pkuseg s3tokenizer omegaconf diffusers==0.29.0 gradio==5.44.1 --no-build-isolation
 pip install voxcpm --no-deps 2>/dev/null || pip install voxcpm
 pip install chatterbox-tts --no-deps 2>/dev/null || pip install chatterbox-tts
 

@@ -343,7 +343,14 @@ def main():
                     try:
                         import transformers.modeling_rope_utils as _rope_utils
                         if "default" not in _rope_utils.ROPE_INIT_FUNCTIONS:
-                            _rope_utils.ROPE_INIT_FUNCTIONS["default"] = _rope_utils.ROPE_INIT_FUNCTIONS.get("linear", list(_rope_utils.ROPE_INIT_FUNCTIONS.values())[0])
+                            def _default_rope_init_fn(config, device=None, **kwargs):
+                                base = getattr(config, "rope_theta", 10000.0)
+                                # Fix missing num_key_value_heads in older configs
+                                n_heads = getattr(config, "num_attention_heads", 16)
+                                dim = getattr(config, "head_dim", getattr(config, "hidden_size", 2048) // max(n_heads, 1))
+                                inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).float().to(device) / dim))
+                                return inv_freq, 1.0
+                            _rope_utils.ROPE_INIT_FUNCTIONS["default"] = _default_rope_init_fn
                     except Exception:
                         pass
 
