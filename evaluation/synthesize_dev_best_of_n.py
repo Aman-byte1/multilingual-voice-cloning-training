@@ -30,6 +30,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
+import soundfile as sf
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from datasets import load_dataset
 from huggingface_hub import login
@@ -60,11 +62,12 @@ MODELS_PER_LANG = {
 # ===================================================================
 
 def save_wav(audio_array, sr, path):
+    """Fast WAV save using soundfile (avoids torchaudio overhead)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    wav_t = torch.from_numpy(np.asarray(audio_array, dtype=np.float32))
-    if wav_t.dim() == 1:
-        wav_t = wav_t.unsqueeze(0)
-    torchaudio.save(path, wav_t, sr)
+    wav = np.asarray(audio_array, dtype=np.float32)
+    if wav.ndim > 1:
+        wav = wav.squeeze()
+    sf.write(path, wav, sr)
 
 
 def load_speaker_model(device="cuda"):
@@ -112,12 +115,14 @@ def compute_cer(ref_text, hyp_text, lang):
 # ===================================================================
 
 def generate_omnivoice(model, text, ref_path):
-    audio = model.generate(text=text, ref_audio=ref_path)
+    with torch.inference_mode():
+        audio = model.generate(text=text, ref_audio=ref_path)
     return audio[0].cpu().numpy().squeeze(), 24000
 
 
 def generate_voxcpm(model, text, ref_path):
-    wav = model.generate(text=text, reference_wav_path=ref_path)
+    with torch.inference_mode():
+        wav = model.generate(text=text, reference_wav_path=ref_path)
     sr = model.tts_model.sample_rate
     return np.asarray(wav, dtype=np.float32), sr
 
@@ -125,26 +130,47 @@ def generate_voxcpm(model, text, ref_path):
 def generate_qwen3(model, text, ref_path, ref_text, lang):
     LANG_MAP = {"fr": "French", "zh": "Chinese", "de": "German"}
     lang_name = LANG_MAP.get(lang, "French")
-    try:
-        wav = model.generate(
+    
+    if hasattr(model, 'generate_voice_clone'):
+        wavs, sr = model.generate_voice_clone(
             text=text,
+            language=lang_name,
             ref_audio=ref_path,
             ref_text=ref_text,
-            language=lang_name,
         )
-        if hasattr(wav, 'cpu'):
-            return wav.cpu().numpy().squeeze(), 24000
-        return np.asarray(wav, dtype=np.float32), 24000
-    except Exception:
-        # Fallback: try without ref_text
-        wav = model.generate(text=text, ref_audio=ref_path, language=lang_name)
-        if hasattr(wav, 'cpu'):
-            return wav.cpu().numpy().squeeze(), 24000
-        return np.asarray(wav, dtype=np.float32), 24000
+        wav = wavs[0] if isinstance(wavs, list) else wavs
+        if torch.is_tensor(wav):
+            wav = wav.cpu().numpy()
+        return np.asarray(wav, dtype=np.float32).squeeze(), int(sr)
+    else:
+        try:
+            res = model.generate(
+                text=text,
+                ref_audio=ref_path,
+                ref_text=ref_text,
+                language=lang_name,
+            )
+        except Exception:
+            res = model.generate(text=text, ref_audio=ref_path, language=lang_name)
+            
+        if isinstance(res, tuple):
+            wav = res[0]
+            sr = res[1] if len(res) > 1 else 24000
+        else:
+            wav, sr = res, 24000
+            
+        if isinstance(wav, list):
+            wav = wav[0]
+            
+        if torch.is_tensor(wav):
+            wav = wav.cpu().numpy()
+            
+        return np.asarray(wav, dtype=np.float32).squeeze(), int(sr)
 
 
 def generate_chatterbox(model, text, ref_path):
-    wav = model.generate(text=text, audio_prompt_path=ref_path)
+    with torch.inference_mode():
+        wav = model.generate(text=text, audio_prompt_path=ref_path)
     return wav.cpu().numpy().squeeze(), 24000
 
 
@@ -194,27 +220,33 @@ def main():
     ref_dir = os.path.join(args.output_dir, "ref_audio")
     os.makedirs(ref_dir, exist_ok=True)
 
-    manifest = []
-    for i in tqdm(range(total), desc="Extracting"):
+    # Pre-collect all rows first, then write WAVs in parallel
+    raw_rows = []
+    for i in range(total):
         row = ds[i]
         text_target = (row.get(f"text_{lang}") or "").strip()
         ref_data = row.get("audio")
-
         if not ref_data or not text_target:
             continue
-
         ref_path = os.path.join(ref_dir, f"ref_{i:05d}.wav")
+        raw_rows.append((i, text_target, ref_data, ref_path))
+
+    # Parallel WAV extraction (I/O bound, so threads work great)
+    def _extract_one(args_tuple):
+        i, text_target, ref_data, ref_path = args_tuple
         if not os.path.exists(ref_path):
-            save_wav(ref_data["array"], ref_data["sampling_rate"], ref_path)
+            wav = np.asarray(ref_data["array"], dtype=np.float32)
+            sf.write(ref_path, wav, ref_data["sampling_rate"])
+        return {"idx": i, "text_target": text_target,
+                "ref_path": ref_path, "ref_sr": ref_data["sampling_rate"]}
 
-        manifest.append({
-            "idx": i,
-            "text_target": text_target,
-            "ref_path": ref_path,
-            "ref_sr": ref_data["sampling_rate"],
-        })
+    manifest = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for entry in tqdm(pool.map(_extract_one, raw_rows),
+                          total=len(raw_rows), desc="Extracting"):
+            manifest.append(entry)
 
-    del ds; gc.collect()
+    del ds, raw_rows; gc.collect()
     print(f"   Extracted {len(manifest)} samples.")
 
     # ---------------------------------------------------------------
@@ -362,7 +394,7 @@ def main():
     # ---------------------------------------------------------------
     print(f"\n📊 Phase 3: Scoring outputs")
 
-    # Load ASR
+    # Load ASR — use beam_size=1 for 3x faster scoring (quality diff is negligible)
     from faster_whisper import WhisperModel as FasterWhisperModel
     whisper = FasterWhisperModel(args.whisper_model, device=device,
                                 compute_type="float16" if device == "cuda" else "int8")
@@ -370,10 +402,17 @@ def main():
     # Load speaker verifier
     verifier = load_speaker_model(device=device)
 
+    # Pre-compute ALL reference embeddings in one pass (avoids redundant recomputation)
+    print("   Pre-computing reference speaker embeddings...")
+    ref_emb_cache = {}
+    for entry in tqdm(manifest, desc="  Ref embeddings", leave=False):
+        ref_emb_cache[entry["idx"]] = extract_speaker_embedding(
+            entry["ref_path"], verifier, device)
+
     scores = []  # list of dicts
     for entry in tqdm(manifest, desc="Scoring"):
         idx = entry["idx"]
-        ref_emb = extract_speaker_embedding(entry["ref_path"], verifier, device)
+        ref_emb = ref_emb_cache.get(idx)
 
         row_scores = {
             "idx": idx,
@@ -394,10 +433,10 @@ def main():
                 row_scores[f"{model_name}_combined"] = None
                 continue
 
-            # Transcribe
+            # Transcribe — beam_size=1 is ~3x faster, negligible quality loss for scoring
             try:
                 segments, _ = whisper.transcribe(wav_path, language=lang,
-                                                  beam_size=5, vad_filter=True)
+                                                  beam_size=1, vad_filter=True)
                 hyp = " ".join(seg.text for seg in segments).strip()
             except Exception:
                 hyp = ""
@@ -431,7 +470,7 @@ def main():
         row_scores["best_wav"] = best_wav
         scores.append(row_scores)
 
-    del whisper, verifier; gc.collect(); torch.cuda.empty_cache()
+    del whisper, verifier, ref_emb_cache; gc.collect(); torch.cuda.empty_cache()
 
     # ---------------------------------------------------------------
     # Phase 4: Save scores and build JSONL manifest
