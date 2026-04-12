@@ -52,9 +52,9 @@ warnings.filterwarnings("ignore")
 # Model configurations per language (top 3)
 # ===================================================================
 MODELS_PER_LANG = {
-    "fr": ["omnivoice", "qwen3", "chatterbox"],
-    "ar": ["omnivoice", "chatterbox", "voxcpm"],  # Qwen3 doesn't support Arabic
-    "zh": ["omnivoice", "voxcpm", "qwen3"],
+    "fr": ["omnivoice", "chatterbox"],
+    "ar": ["omnivoice", "chatterbox", "voxcpm"],
+    "zh": ["omnivoice", "voxcpm"],
 }
 
 # ===================================================================
