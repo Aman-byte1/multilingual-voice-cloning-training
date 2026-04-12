@@ -401,16 +401,72 @@ def main():
                 model_counts[s["best_model"]] = model_counts.get(s["best_model"], 0) + 1
 
     print(f"   Training JSONL saved to {jsonl_path} ({count} samples)")
-    print(f"   Model selection distribution:")
-    for m, c in sorted(model_counts.items(), key=lambda x: -x[1]):
-        pct = 100 * c / count if count > 0 else 0
-        print(f"     {m}: {c} ({pct:.1f}%)")
 
-    # Summary
+    # ---------------------------------------------------------------
+    # Final Summary Table
+    # ---------------------------------------------------------------
+    # Compute per-model stats
+    model_stats = {}
+    for model_name in models_to_run:
+        cers = [s.get(f"{model_name}_cer") for s in scores
+                if s.get(f"{model_name}_cer") is not None]
+        sims = [s.get(f"{model_name}_sim") for s in scores
+                if s.get(f"{model_name}_sim") is not None]
+        combos = [s.get(f"{model_name}_combined") for s in scores
+                  if s.get(f"{model_name}_combined") is not None]
+        wins = model_counts.get(model_name, 0)
+        model_stats[model_name] = {
+            "wins": wins,
+            "pct": 100 * wins / count if count > 0 else 0,
+            "avg_cer": np.mean(cers) if cers else np.nan,
+            "avg_sim": np.mean(sims) if sims else np.nan,
+            "avg_combined": np.mean(combos) if combos else np.nan,
+            "generated": len(cers),
+        }
+
     valid_scores = [s["best_score"] for s in scores if s["best_score"] > 0]
+
+    print("\n")
+    print("=" * 72)
+    print(f"  BEST-OF-N RESULTS — {lang.upper()} ({count} samples)")
+    print("=" * 72)
+    print()
+    print("  Scoring formula:")
+    print("    Combined = 0.5 × (1 - CER) + 0.5 × Speaker_Similarity")
+    print("    → Higher = better (max 1.0)")
+    print()
+    print("-" * 72)
+    print(f"  {'Model':<14} {'Rows Won':>10} {'% of Data':>10} {'Avg CER':>10} "
+          f"{'Avg Sim':>10} {'Avg Score':>10}")
+    print("-" * 72)
+
+    for model_name in sorted(model_stats, key=lambda m: -model_stats[m]["wins"]):
+        st = model_stats[model_name]
+        print(f"  {model_name:<14} {st['wins']:>10} {st['pct']:>9.1f}% "
+              f"{st['avg_cer']:>10.4f} {st['avg_sim']:>10.4f} "
+              f"{st['avg_combined']:>10.4f}")
+
+    print("-" * 72)
     if valid_scores:
-        print(f"\n   Average best-of-N combined score: {np.mean(valid_scores):.4f}")
-        print(f"   Min: {np.min(valid_scores):.4f}, Max: {np.max(valid_scores):.4f}")
+        print(f"  {'BEST-OF-N':<14} {count:>10} {'100.0':>9}% "
+              f"{'—':>10} {'—':>10} {np.mean(valid_scores):>10.4f}")
+    print("=" * 72)
+    print()
+
+    # Also save the table as JSON
+    summary = {
+        "lang": lang,
+        "total_samples": count,
+        "scoring_formula": "0.5 * (1 - CER) + 0.5 * Speaker_Similarity",
+        "avg_best_of_n_score": float(np.mean(valid_scores)) if valid_scores else None,
+        "model_stats": {m: {k: float(v) if isinstance(v, (np.floating, float)) else v
+                            for k, v in st.items()}
+                        for m, st in model_stats.items()},
+    }
+    summary_path = os.path.join(args.output_dir, f"summary_{lang}.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"  Summary saved to {summary_path}")
 
     print(f"\n✅ Done for {lang}!")
 
