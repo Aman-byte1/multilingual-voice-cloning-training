@@ -34,6 +34,11 @@ from tqdm import tqdm
 from datasets import load_dataset
 from huggingface_hub import login
 
+import logging
+# Silence torchcodec spam
+logging.getLogger("torchcodec").setLevel(logging.CRITICAL)
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+
 sys.path.insert(0, os.path.dirname(__file__))
 torch.set_float32_matmul_precision("high")
 warnings.filterwarnings("ignore")
