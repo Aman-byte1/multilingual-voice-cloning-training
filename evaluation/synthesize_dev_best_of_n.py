@@ -227,6 +227,21 @@ def main():
 
         try:
             if model_name == "omnivoice":
+                # Monkey-patch load_audio to use torchaudio instead of torchcodec
+                import omnivoice.utils.audio as _omni_audio
+                def _load_audio_torchaudio(audio_path: str, sampling_rate: int):
+                    wav, sr = torchaudio.load(audio_path)
+                    if wav.shape[0] > 1:
+                        wav = wav.mean(dim=0, keepdim=True)
+                    if sr != sampling_rate:
+                        wav = torchaudio.functional.resample(wav, sr, sampling_rate)
+                    return wav.squeeze(0)
+                _omni_audio.load_audio = _load_audio_torchaudio
+
+                # Also patch it in the model module so the already-imported reference updates
+                import omnivoice.models.omnivoice as _omni_model
+                _omni_model.load_audio = _load_audio_torchaudio
+
                 from omnivoice import OmniVoice
                 model = OmniVoice.from_pretrained(
                     "k2-fsa/OmniVoice", device_map=f"{device}:0", dtype=torch.float16)
