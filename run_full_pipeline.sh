@@ -85,6 +85,13 @@ try:
     import qwen_tts; print('   ✅ qwen_tts')
 except: print('   ⚠ qwen_tts not available (will use transformers)')
 "
+# Fix qwen_tts compatibility with transformers 5.x
+# (check_model_inputs changed from decorator factory to plain decorator)
+QWEN_TTS_FILE=$(python3 -c "import qwen_tts; import os; print(os.path.join(os.path.dirname(qwen_tts.__file__), 'core/tokenizer_12hz/modeling_qwen3_tts_tokenizer_v2.py'))" 2>/dev/null || echo "")
+if [ -n "${QWEN_TTS_FILE}" ] && [ -f "${QWEN_TTS_FILE}" ]; then
+    sed -i 's/@check_model_inputs()/@check_model_inputs/g' "${QWEN_TTS_FILE}"
+    echo "   🔧 Patched qwen_tts for transformers compat"
+fi
 
 echo "   ✅ All dependencies installed"
 
