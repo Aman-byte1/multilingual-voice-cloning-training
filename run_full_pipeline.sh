@@ -164,6 +164,15 @@ if [ ! -d "./OmniVoice" ]; then
     cd OmniVoice && pip install -e ".[train]" 2>/dev/null || pip install -e . && cd ..
 fi
 
+# Fix: flex_attention crashes on GPUs with <128KB shared memory (T4, etc.).
+# The OmniVoice builder hardcodes flex_attention which requires torch.compile +
+# Triton autotuning.  Switch to SDPA which works on all GPUs.
+if grep -q 'flex_attention' ./OmniVoice/omnivoice/training/builder.py 2>/dev/null; then
+    sed -i 's/attn_implementation="flex_attention"/attn_implementation="sdpa"/g' \
+        ./OmniVoice/omnivoice/training/builder.py
+    echo "   🔧 Patched OmniVoice builder: flex_attention → sdpa"
+fi
+
 export PYTHONPATH="./OmniVoice:${PYTHONPATH:-}"
 
 # ---------------------------------------------------------------
@@ -289,6 +298,10 @@ echo "🚀 STEP 9: Fine-tuning OmniVoice..."
 echo "  This will take a while..."
 
 OUTPUT_DIR="./exp/omnivoice_finetuned"
+
+# Disable torch.compile/dynamo as a safety net — flex_attention and inductor
+# can fail on GPUs with limited shared memory.  SDPA works without compilation.
+export TORCHDYNAMO_DISABLE=1
 
 accelerate launch \
     --gpu_ids "0" \
