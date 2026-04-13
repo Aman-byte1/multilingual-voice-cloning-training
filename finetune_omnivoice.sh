@@ -49,9 +49,9 @@ fi
 # The OmniVoice builder hardcodes flex_attention which requires torch.compile +
 # Triton autotuning.  Switch to SDPA which works on all GPUs.
 if grep -q 'flex_attention' "${OMNIVOICE_DIR}/omnivoice/training/builder.py" 2>/dev/null; then
-    sed -i 's/attn_implementation="flex_attention"/attn_implementation="sdpa"/g' \
+    sed -i 's/attn_implementation="flex_attention"/attn_implementation="eager"/g' \
         "${OMNIVOICE_DIR}/omnivoice/training/builder.py"
-    echo "   🔧 Patched OmniVoice builder: flex_attention → sdpa"
+    echo "   🔧 Patched OmniVoice builder: flex_attention → eager"
 fi
 
 export PYTHONPATH="${OMNIVOICE_DIR}:${PYTHONPATH:-}"
@@ -135,7 +135,7 @@ echo "📝 Step 3: Creating config files..."
 CONFIG_DIR="${DATA_DIR}/config"
 mkdir -p "${CONFIG_DIR}"
 
-# Training config — full fine-tuning, optimized for A100 80GB
+# Training config — full fine-tuning, optimized for A40 48GB w/ eager attention
 cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
 {
     "llm_name_or_path": "Qwen/Qwen3-0.6B",
@@ -158,22 +158,22 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "learning_rate": 1e-5,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
-    "steps": 3000,
+    "steps": 500,
     "seed": 42,
     "warmup_type": "ratio",
     "warmup_ratio": 0.05,
     "warmup_steps": 0,
 
-    "batch_tokens": 16384,
-    "gradient_accumulation_steps": 4,
+    "batch_tokens": 4096,
+    "gradient_accumulation_steps": 16,
     "num_workers": 4,
 
     "mixed_precision": "bf16",
     "allow_tf32": true,
 
     "logging_steps": 25,
-    "eval_steps": 250,
-    "save_steps": 250,
+    "eval_steps": 100,
+    "save_steps": 100,
     "keep_last_n_checkpoints": 3
 }
 TRAIN_EOF
@@ -206,7 +206,7 @@ echo "  GPUs: ${GPU_IDS} (${NUM_GPUS})"
 echo "  Output: ${OUTPUT_DIR}"
 
 # Disable torch.compile/dynamo as a safety net — flex_attention and inductor
-# can fail on GPUs with limited shared memory.  SDPA works without compilation.
+# can fail on GPUs with limited shared memory.  Eager works without compilation.
 export TORCHDYNAMO_DISABLE=1
 
 accelerate launch \

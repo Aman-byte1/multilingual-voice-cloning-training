@@ -1,33 +1,37 @@
 # ============================================================
-# Evaluation Pipeline Dependencies
+# Evaluation Pipeline Dependencies (Verified Working Stack)
 # ============================================================
-# Install: pip install -r evaluation/requirements.txt
-#
-# NOTE: Install PyTorch FIRST with the correct CUDA version
-# for your system before running pip install -r:
-#   pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu121
+# Install with:
+# pip install -r evaluation/requirements.txt
 # ============================================================
 
-# --- Core ---
+# --- Core (Aligned with torch 2.5.1+cu121) ---
+--index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1
+torchaudio==2.5.1
+torchvision==0.20.1
+
+# --- Processing & Data ---
 numpy<2.0.0
 scipy
 librosa
 soundfile
-
-# --- TTS Model ---
-chatterbox-tts==0.1.7
-transformers==5.2.0
-
-# --- Dataset ---
+fsspec[http]<=2025.3.0
 datasets<4.0
 huggingface_hub
 
-# --- ASR ---
+# --- TTS Models ---
+transformers==5.5.3
+accelerate
+chatterbox-tts==0.1.7
+
+# --- ASR (for content accuracy) ---
 faster-whisper
 
 # --- Metrics ---
 jiwer
 speechbrain
+resemblyzer
 
 # --- Utilities ---
 tqdm
