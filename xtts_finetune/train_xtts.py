@@ -125,10 +125,7 @@ def main():
         lr=5e-06,
         lr_scheduler="MultiStepLR",
         lr_scheduler_params={"milestones": [50000 * 18, 150000 * 18, 300000 * 18], "gamma": 0.5, "last_epoch": -1},
-        test_sentences=[
-            {"text": "Bonjour, ceci est un test de clonage vocal en français.", "speaker_wav": sample_speaker_wav, "language": "fr"},
-            {"text": "هذا اختبار لاستنساخ الصوت باللغة العربية.", "speaker_wav": sample_speaker_wav, "language": "ar"},
-        ],
+        test_sentences=[],
         datasets=dataset_configs
     )
 
