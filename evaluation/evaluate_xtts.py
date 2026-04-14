@@ -87,11 +87,10 @@ def main():
     xtts_lang_map = {"fr": "fr", "ar": "ar", "zh": "zh-cn", "en": "en"}
     xtts_lang = xtts_lang_map.get(args.whisper_lang, args.whisper_lang)
     
-    ds = load_dataset(args.dataset, "default", split=args.split)
+    ds = load_dataset(args.dataset, split=args.split)
     
-    if args.whisper_lang in ["fr", "ar", "zh", "ru"]:
-        ds = ds.filter(lambda x: x["lang"] == args.whisper_lang)
     if args.max_samples:
+        ds = ds.select(range(min(len(ds), args.max_samples)))
         ds = ds.select(range(min(len(ds), args.max_samples)))
 
     print(f"   Samples: {len(ds)}")
@@ -132,9 +131,14 @@ def main():
     for i, row in enumerate(tqdm(ds)):
         try:
             # Prepare Reference Target
-            target_text = row["text"]
-            audio_data = row["audio"]["array"]
-            sr = row["audio"]["sampling_rate"]
+            text_target = (row.get(f"trg_{args.whisper_lang}_text") or row.get(f"text_{args.whisper_lang}") or "").strip()
+            ref_data = (row.get("ref_en_voice") or row.get(f"ref_{args.whisper_lang}_voice") or row.get("audio_en") or row.get("audio"))
+            
+            if not ref_data or not text_target:
+                continue
+                
+            audio_data = ref_data["array"]
+            sr = ref_data["sampling_rate"]
 
             ref_wav_path = os.path.join(ref_dir, f"ref_{i}.wav")
             wav_t = torch.from_numpy(audio_data).float()
@@ -148,7 +152,7 @@ def main():
             
             # The heart of the wrapper
             tts.tts_to_file(
-                text=target_text,
+                text=text_target,
                 speaker_wav=ref_wav_path,
                 language=xtts_lang,
                 file_path=syn_wav_path
@@ -177,8 +181,8 @@ def main():
             transcription = " ".join([seg.text.strip() for seg in segments])
             
             try:
-                wer = jiwer.wer(target_text.lower(), transcription.lower())
-                cer = jiwer.cer(target_text.lower(), transcription.lower())
+                wer = jiwer.wer(text_target.lower(), transcription.lower())
+                cer = jiwer.cer(text_target.lower(), transcription.lower())
             except Exception:
                 wer = np.nan
                 cer = np.nan
@@ -191,7 +195,7 @@ def main():
             
             per_sample_log.append({
                 "id": i,
-                "target": target_text,
+                "target": text_target,
                 "pred": transcription,
                 "wer": wer,
                 "cer": cer,
