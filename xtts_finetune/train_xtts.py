@@ -81,6 +81,13 @@ def main():
     
     audio_config = XttsAudioConfig(sample_rate=22050, dvae_sample_rate=22050, output_sample_rate=24000)
 
+    sample_speaker_wav = None
+    wavs_dir = os.path.join(args.dataset_path, "wavs")
+    if os.path.exists(wavs_dir):
+        wav_files = [f for f in os.listdir(wavs_dir) if f.endswith(".wav")]
+        if wav_files:
+            sample_speaker_wav = os.path.join(wavs_dir, wav_files[0])
+
     config = GPTTrainerConfig(
         output_path=args.output_path,
         model_args=model_args,
@@ -108,7 +115,7 @@ def main():
         lr_scheduler="MultiStepLR",
         lr_scheduler_params={"milestones": [50000 * 18, 150000 * 18, 300000 * 18], "gamma": 0.5, "last_epoch": -1},
         test_sentences=[
-            {"text": "Bonjour, ceci est un test de clonage vocal en français.", "speaker_wav": None, "language": "fr"}
+            {"text": "Bonjour, ceci est un test de clonage vocal en français.", "speaker_wav": sample_speaker_wav, "language": "fr"}
         ],
         datasets=dataset_configs
     )
