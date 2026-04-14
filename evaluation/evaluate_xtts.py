@@ -96,19 +96,31 @@ def main():
     print(f"   Samples: {len(ds)}")
     
     print("🔧 Phase 2: Loading XTTS model...")
-    # Determine the actual model checkpoint (Trainer appends steps to best_model)
     import glob
-    model_path = os.path.join(args.model_dir, "best_model.pth")
-    if not os.path.exists(model_path):
+    import shutil
+    
+    # XTTS natively hardcodes loading "model.pth" from the checkpoint directory.
+    # The Trainer outputs "best_model_XYZ.pth", so we must create a symlink or copy
+    # named exactly "model.pth" in the same directory for the API to find it.
+    target_model_file = os.path.join(args.model_dir, "model.pth")
+    
+    if not os.path.exists(target_model_file):
         candidates = glob.glob(os.path.join(args.model_dir, "best_model_*.pth"))
         if candidates:
-            model_path = sorted(candidates, key=os.path.getmtime)[-1]
+            best_model_path = sorted(candidates, key=os.path.getmtime)[-1]
+            print(f"   Copying {os.path.basename(best_model_path)} -> model.pth")
+            shutil.copy(best_model_path, target_model_file)
+        else:
+            candidates = glob.glob(os.path.join(args.model_dir, "checkpoint_*.pth"))
+            if candidates:
+                best_model_path = sorted(candidates, key=os.path.getmtime)[-1]
+                print(f"   Copying {os.path.basename(best_model_path)} -> model.pth")
+                shutil.copy(best_model_path, target_model_file)
             
     config_path = os.path.join(args.model_dir, "config.json")
-    vocab_path = os.path.join(args.model_dir, "vocab.json")
     
-    # We use TTS API to abstract loading the XTTS layers
-    tts = TTS(model_path=model_path, config_path=config_path, progress_bar=False).to(device)
+    # We pass args.model_dir as the model_path because XTTS expects a directory
+    tts = TTS(model_path=args.model_dir, config_path=config_path, progress_bar=False).to(device)
 
     print("🧠 Loading Faster-Whisper for ASR...")
     from faster_whisper import WhisperModel
