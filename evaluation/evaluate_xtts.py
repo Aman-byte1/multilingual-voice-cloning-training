@@ -127,7 +127,8 @@ def main():
         try:
             print("   Restoring missing vocab.json from base XTTS model...")
             manager = ModelManager()
-            base_model_path = manager.download_model("tts_models/multilingual/multi-dataset/xtts_v2")
+            # download_model returns a tuple like (model_path, config_path, item)
+            base_model_path = manager.download_model("tts_models/multilingual/multi-dataset/xtts_v2")[0]
             base_vocab_path = os.path.join(base_model_path, "vocab.json")
             if os.path.exists(base_vocab_path):
                 shutil.copy(base_vocab_path, vocab_path)
