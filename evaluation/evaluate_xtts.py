@@ -118,6 +118,22 @@ def main():
                 shutil.copy(best_model_path, target_model_file)
             
     config_path = os.path.join(args.model_dir, "config.json")
+    vocab_path = os.path.join(args.model_dir, "vocab.json")
+    
+    # The Trainer does NOT automatically copy the tokenizer vocabulary (vocab.json).
+    # If it's missing, XTTS silently builds a NoneType tokenizer and crashes on .encode().
+    if not os.path.exists(vocab_path):
+        from TTS.utils.manage import ModelManager
+        try:
+            print("   Restoring missing vocab.json from base XTTS model...")
+            manager = ModelManager()
+            base_model_path = manager.download_model("tts_models/multilingual/multi-dataset/xtts_v2")
+            base_vocab_path = os.path.join(base_model_path, "vocab.json")
+            if os.path.exists(base_vocab_path):
+                shutil.copy(base_vocab_path, vocab_path)
+                print("   Successfully recovered vocab.json!")
+        except Exception as e:
+            print(f"   Failed to recover vocab.json: {e}")
     
     # We pass args.model_dir as the model_path because XTTS expects a directory
     tts = TTS(model_path=args.model_dir, config_path=config_path, progress_bar=False).to(device)
