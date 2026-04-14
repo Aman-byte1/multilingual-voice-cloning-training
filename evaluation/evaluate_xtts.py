@@ -143,7 +143,7 @@ def main():
     from faster_whisper import WhisperModel
     import jiwer
     
-    whisper = WhisperModel(args.whisper_model, device=device, compute_type="float16")
+    whisper = WhisperModel(args.whisper_model, device=device, compute_type="default")
 
     print("🗣️  Loading SpeechBrain ECAPA-TDNN for Speaker Similarity...")
     spk_model = load_speaker_model(device=device)
