@@ -32,7 +32,6 @@ echo "================================================================="
 echo " 2. Preparing Dataset (Resampling to 22.05kHz)"
 echo "================================================================="
 python "$XTTS_DIR/prep_xtts_dataset.py" \
-    --dev-synth-dir "$WORKSPACE_DIR/dev_synth" \
     --output-dir "$WORKSPACE_DIR/data/xtts_dataset"
 
 echo "================================================================="
