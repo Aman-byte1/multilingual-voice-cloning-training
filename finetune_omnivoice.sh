@@ -68,16 +68,17 @@ TRAIN_JSONL="${DATA_DIR}/train.jsonl"
 DEV_JSONL="${DATA_DIR}/dev.jsonl"
 
 # Merge all language JSONLs
-cat /dev/null > "${MERGED_JSONL}"
-for lang in fr ar zh; do
-    SRC="${DEV_SYNTH_DIR}/train_${lang}.jsonl"
-    if [ -f "${SRC}" ]; then
-        echo "  Adding ${SRC} ($(wc -l < ${SRC}) samples)"
-        cat "${SRC}" >> "${MERGED_JSONL}"
-    else
-        echo "  ⚠ Missing ${SRC}"
-    fi
-done
+# (Bypassed) Directly reusing the downloaded merged_all.jsonl from HuggingFace
+# cat /dev/null > "${MERGED_JSONL}"
+# for lang in fr ar zh; do
+#     SRC="${DEV_SYNTH_DIR}/train_${lang}.jsonl"
+#     if [ -f "${SRC}" ]; then
+#         echo "  Adding ${SRC} ($(wc -l < ${SRC}) samples)"
+#         cat "${SRC}" >> "${MERGED_JSONL}"
+#     else
+#         echo "  ⚠ Missing ${SRC}"
+#     fi
+# done
 
 TOTAL=$(wc -l < "${MERGED_JSONL}")
 echo "  Total merged samples: ${TOTAL}"
