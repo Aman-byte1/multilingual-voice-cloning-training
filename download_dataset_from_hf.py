@@ -35,10 +35,11 @@ def main():
         out_wav = os.path.join(output_dir, f"sample_{i:05d}.wav")
         sf.write(out_wav, audio_array, sample_rate)
         
-        # OmniVoice `extract_audio_tokens.py` generally expects 'audio' and 'text'.
-        # Assuming the token extraction uses standard keys.
+        # OmniVoice `extract_audio_tokens.py` expects:
+        # {"id": "...", "audio_path": "...", "text": "..."}
         manifest_entries.append({
-            "audio": os.path.abspath(out_wav),
+            "id": f"sample_{i:05d}",
+            "audio_path": os.path.abspath(out_wav),
             "text": row["text"]
         })
 
