@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Cross-Lingual Voice Cloning Evaluation Pipeline — XTTS-v2
-==========================================================
-Zero-shot Coqui XTTS-v2 evaluation on ymoslem/acl-6060.
-Supports 17 languages including Arabic, Chinese, French.
+Cross-Lingual Voice Cloning Evaluation Pipeline — XTTS v2
+=============================================================
+Zero-shot XTTS finetuning evaluation on ymoslem/acl-6060.
 Metrics: WER, CER, Speaker Similarity, Inference Time, RTF.
 
 ASR: faster-whisper large-v3
@@ -23,63 +22,15 @@ import torch.nn.functional as F
 import torchaudio
 from tqdm import tqdm
 from datasets import load_dataset
-from huggingface_hub import login
 
-sys.path.insert(0, os.path.dirname(__file__))
+from TTS.api import TTS
 
 torch.set_float32_matmul_precision("high")
 warnings.filterwarnings("ignore")
 
-# ---- Monkey-patch for coqui-tts 0.27.5 + transformers>=4.57 compat ----
-# coqui-tts imports `isin_mps_friendly` which was removed in transformers 4.57
-import transformers.pytorch_utils as _pu
-if not hasattr(_pu, "isin_mps_friendly"):
-    _pu.isin_mps_friendly = torch.isin
-
-# ===================================================================
-# Language config — XTTS-v2 uses ISO codes (with zh-cn for Chinese)
-# Supports: en, es, fr, de, it, pt, pl, tr, ru, nl, cs, ar, zh-cn,
-#           ja, hu, ko, hi
-# ===================================================================
-XTTS_LANG_MAP = {
-    "fr": "fr",
-    "ar": "ar",
-    "zh": "zh-cn",   # XTTS uses "zh-cn" not "zh"
-    "en": "en",
-    "es": "es",
-    "de": "de",
-    "it": "it",
-    "pt": "pt",
-    "pl": "pl",
-    "tr": "tr",
-    "ru": "ru",
-    "nl": "nl",
-    "cs": "cs",
-    "ja": "ja",
-    "hu": "hu",
-    "ko": "ko",
-    "hi": "hi",
-}
-
-
 # ===================================================================
 # Helper functions
 # ===================================================================
-
-def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval", output_dir: str = None) -> str:
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        path = os.path.join(output_dir, f"{prefix}.wav")
-    else:
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix=".wav", prefix=prefix)
-        os.close(fd)
-
-    wav_t = torch.from_numpy(audio_array).float()
-    if wav_t.dim() == 1:
-        wav_t = wav_t.unsqueeze(0)
-    torchaudio.save(path, wav_t, sr)
-    return path
 
 def load_speaker_model(device="cuda"):
     from speechbrain.inference.speaker import SpeakerRecognition
@@ -112,270 +63,173 @@ def safe_std(vals):
 def safe_count(vals):
     return len([x for x in vals if x is not None and not np.isnan(x)])
 
-
 # ===================================================================
 # Main Pipeline
 # ===================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Cross-Lingual Voice Cloning Evaluation — XTTS-v2")
-    parser.add_argument("--dataset",
-                        default="ymoslem/acl-6060")
-    parser.add_argument("--model-name",
-                        default="tts_models/multilingual/multi-dataset/xtts_v2",
-                        help="Coqui TTS model name")
+    parser = argparse.ArgumentParser(description="Cross-Lingual Voice Cloning Evaluation — XTTS")
+    parser.add_argument("--dataset", default="ymoslem/acl-6060")
+    parser.add_argument("--model-dir", required=True, help="Path to XTTS finetuned exp directory (e.g., exp/xtts_finetuned/...)")
     parser.add_argument("--split", default="eval")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--whisper-model", default="large-v3")
     parser.add_argument("--whisper-beam", type=int, default=5)
-    parser.add_argument("--whisper-lang", default="fr",
-                        help="Language code (fr, ar, zh, etc.)")
-    parser.add_argument("--output-dir", default="./eval_results_xtts")
-    parser.add_argument("--cache-dir", default="./data_cache")
-    parser.add_argument("--resume", action="store_true", help="Skip generation if audio already exists")
-    parser.add_argument("--hf-token", default=None, help="Hugging Face API token for authentication")
+    parser.add_argument("--whisper-lang", default="fr", help="Language code for ASR")
+    parser.add_argument("--output-dir", default="./eval_results_xtts_ft")
     args = parser.parse_args()
 
-    if args.hf_token:
-        print("🔑 Authenticating with Hugging Face...")
-        login(token=args.hf_token)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.output_dir, exist_ok=True)
-    target_lang = args.whisper_lang.strip().lower()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    if target_lang not in XTTS_LANG_MAP:
-        print(f"\n❌ ERROR: '{target_lang}' is NOT supported by XTTS-v2.")
-        print(f"   Supported: {', '.join(sorted(XTTS_LANG_MAP.keys()))}")
-        sys.exit(1)
+    print("📥 Loading evaluation dataset...")
+    # Map whisper lang code to XTTS lang code
+    xtts_lang_map = {"fr": "fr", "ar": "ar", "zh": "zh-cn", "en": "en"}
+    xtts_lang = xtts_lang_map.get(args.whisper_lang, args.whisper_lang)
+    
+    ds = load_dataset(args.dataset, "default", split=args.split)
+    
+    if args.whisper_lang in ["fr", "ar", "zh", "ru"]:
+        ds = ds.filter(lambda x: x["lang"] == args.whisper_lang)
+    if args.max_samples:
+        ds = ds.select(range(min(len(ds), args.max_samples)))
 
-    xtts_lang = XTTS_LANG_MAP[target_lang]
+    print(f"   Samples: {len(ds)}")
+    
+    print("🔧 Phase 2: Loading XTTS model...")
+    # Determine the actual model checkpoint (Trainer appends steps to best_model)
+    import glob
+    model_path = os.path.join(args.model_dir, "best_model.pth")
+    if not os.path.exists(model_path):
+        candidates = glob.glob(os.path.join(args.model_dir, "best_model_*.pth"))
+        if candidates:
+            model_path = sorted(candidates, key=os.path.getmtime)[-1]
+            
+    config_path = os.path.join(args.model_dir, "config.json")
+    vocab_path = os.path.join(args.model_dir, "vocab.json")
+    
+    # We use TTS API to abstract loading the XTTS layers
+    tts = TTS(model_path=model_path, config_path=config_path, progress_bar=False).to(device)
 
-    print("=" * 64)
-    print(f"  XTTS-v2 EVALUATION ({target_lang} / {xtts_lang})")
-    print("=" * 64)
-
-    # Ensure temp dir for references (on disk, not RAM)
-    temp_ref_dir = os.path.join(args.output_dir, "temp_ref")
-    os.makedirs(temp_ref_dir, exist_ok=True)
-
-    # PHASE 1: Load dataset and pre-extract to disk
-    print(f"\n📥 Phase 1: Loading dataset and extracting to disk")
-    ds_test = load_dataset(args.dataset, split=args.split, cache_dir=args.cache_dir)
-    total = len(ds_test)
-    if args.max_samples and args.max_samples < total:
-        step = max(1, total // args.max_samples)
-        indices = list(range(0, total, step))[:args.max_samples]
-        ds_test = ds_test.select(indices)
-    total = len(ds_test)
-    print(f"   Samples: {total}")
-
-    # Pre-extract all text and ref audio to disk, then free the dataset
-    print(f"   Extracting references to {temp_ref_dir} ...")
-    manifest = []
-    for i in tqdm(range(total), desc="Extracting"):
-        row = ds_test[i]
-        text_target = (row.get(f"trg_{target_lang}_text") or row.get(f"text_{target_lang}") or "").strip()
-        ref_data = row.get("ref_en_voice") or row.get(f"ref_{target_lang}_voice") or row.get("audio_en") or row.get("audio")
-
-        if not ref_data or not text_target:
-            continue
-
-        ref_path = save_temp_wav(
-            np.asarray(ref_data["array"], dtype=np.float32),
-            ref_data["sampling_rate"],
-            f"ref_{i:05d}",
-            output_dir=temp_ref_dir
-        )
-        manifest.append({
-            "idx": i,
-            "text_target": text_target,
-            "ref_path": ref_path,
-            "speaker_id": row.get("speaker_id", "unknown"),
-        })
-
-    # FREE the dataset to save RAM
-    del ds_test
-    gc.collect()
-    print(f"   Extracted {len(manifest)} samples. Dataset freed from RAM.")
-
-    # PHASE 2: Load XTTS-v2
-    print(f"\n🔧 Phase 2: Loading XTTS-v2 model")
-    from TTS.api import TTS
-    tts = TTS(args.model_name, gpu=(device == "cuda"))
-    print("   XTTS-v2 loaded ✓")
-
-    XTTS_SR = 24000  # XTTS-v2 native sample rate
-
-    # PHASE 3: Generate (using pre-extracted manifest)
-    print(f"\n🎙  Phase 3: Generating {len(manifest)} samples")
-    samples = []
-    skipped = 0
-    inference_times = []
-    audio_durations = []
-
-    for entry in tqdm(manifest, desc="Generating"):
-        i = entry["idx"]
-        syn_path = os.path.join(args.output_dir, f"synth_{i:05d}.wav")
-        ref_path = entry["ref_path"]
-        text_target = entry["text_target"]
-
-        # Resume logic: skip generation if file exists
-        if args.resume and os.path.exists(syn_path):
-            try:
-                wav_info = torchaudio.info(syn_path)
-                audio_dur = wav_info.num_frames / wav_info.sample_rate
-                samples.append({
-                    "idx": i, "syn_path": syn_path, "ref_path": ref_path,
-                    "text_target": text_target, "speaker_id": entry["speaker_id"],
-                    "inference_s": 0, "audio_dur_s": audio_dur, "rtf": 0
-                })
-                continue
-            except Exception:
-                pass  # If file is corrupt, re-generate
-
-        try:
-            t0 = time.perf_counter()
-            tts.tts_to_file(
-                text=text_target,
-                speaker_wav=ref_path,
-                language=xtts_lang,
-                file_path=syn_path
-            )
-            t1 = time.perf_counter()
-        except Exception as e:
-            print(f"   ⚠ Sample {i} generation failed: {e}")
-            skipped += 1
-            continue
-
-        elapsed = t1 - t0
-        try:
-            info = torchaudio.info(syn_path)
-            audio_dur = info.num_frames / info.sample_rate
-        except Exception:
-            audio_dur = 0
-
-        inference_times.append(elapsed)
-        audio_durations.append(audio_dur)
-
-        samples.append({
-            "idx": i,
-            "syn_path": syn_path,
-            "ref_path": ref_path,
-            "text_target": text_target,
-            "speaker_id": entry["speaker_id"],
-            "inference_s": elapsed,
-            "audio_dur_s": audio_dur,
-            "rtf": elapsed / audio_dur if audio_dur > 0 else 0
-        })
-
-        # Proactive OOM prevention
-        if i % 25 == 0:
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    print(f"   Generated: {len(samples)} | Skipped: {skipped}")
-    del tts
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    # PHASE 4: ASR
-    print(f"\n🗣  Phase 4: Transcribing ({target_lang})")
-    from faster_whisper import WhisperModel as FasterWhisperModel
-    whisper = FasterWhisperModel(args.whisper_model, device=device, compute_type="float16" if device == "cuda" else "int8")
-
-    transcripts = []
-    for s in tqdm(samples, desc="Transcribing"):
-        try:
-            segments, _ = whisper.transcribe(s["syn_path"], language=target_lang, beam_size=args.whisper_beam, vad_filter=True)
-            transcripts.append(" ".join(seg.text for seg in segments).strip())
-        except Exception:
-            transcripts.append("")
-
-    del whisper
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    # PHASE 5: Metrics
-    print(f"\n📊 Phase 5: Computing Metrics")
-    verifier = load_speaker_model(device=device)
+    print("🧠 Loading Faster-Whisper for ASR...")
+    from faster_whisper import WhisperModel
     import jiwer
+    
+    whisper = WhisperModel(args.whisper_model, device=device, compute_type="float16")
 
-    # Language-appropriate text normalization
-    if target_lang in ("zh", "ar", "ja", "ko"):
-        wer_transforms = jiwer.Compose([
-            jiwer.ToLowerCase(),
-            jiwer.RemoveMultipleSpaces(),
-            jiwer.Strip(),
-        ])
-    else:
-        wer_transforms = jiwer.Compose([
-            jiwer.ToLowerCase(),
-            jiwer.RemoveMultipleSpaces(),
-            jiwer.Strip(),
-            jiwer.RemovePunctuation(),
-        ])
+    print("🗣️  Loading SpeechBrain ECAPA-TDNN for Speaker Similarity...")
+    spk_model = load_speaker_model(device=device)
 
-    results = []
-    for s, tx in tqdm(zip(samples, transcripts), total=len(samples), desc="Metrics"):
-        # Speaker Similarity
-        syn_emb = extract_speaker_embedding(s["syn_path"], verifier, device)
-        ref_emb = extract_speaker_embedding(s["ref_path"], verifier, device)
-        sim = float(F.cosine_similarity(syn_emb.unsqueeze(0), ref_emb.unsqueeze(0)).item()) if (syn_emb is not None and ref_emb is not None) else None
+    print(f"\n📊 Evaluating XTTS on {args.whisper_lang}...")
+    metrics = {"wer": [], "cer": [], "sim": [], "inf_time": [], "rtf": []}
+    per_sample_log = []
+    
+    ref_dir = os.path.join(args.output_dir, "references")
+    syn_dir = os.path.join(args.output_dir, "synthesized")
+    os.makedirs(ref_dir, exist_ok=True)
+    os.makedirs(syn_dir, exist_ok=True)
 
-        # WER / CER
+    for i, row in enumerate(tqdm(ds)):
         try:
-            if tx.strip():
-                ref_clean = wer_transforms(s["text_target"])
-                hyp_clean = wer_transforms(tx)
-                w = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
-                c = float(jiwer.cer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
-            else:
-                w = c = 1.0
+            # Prepare Reference Target
+            target_text = row["text"]
+            audio_data = row["audio"]["array"]
+            sr = row["audio"]["sampling_rate"]
+
+            ref_wav_path = os.path.join(ref_dir, f"ref_{i}.wav")
+            wav_t = torch.from_numpy(audio_data).float()
+            if wav_t.dim() == 1:
+                wav_t = wav_t.unsqueeze(0)
+            torchaudio.save(ref_wav_path, wav_t, sr)
+            
+            # Predict
+            start_t = time.time()
+            syn_wav_path = os.path.join(syn_dir, f"syn_{i}.wav")
+            
+            # The heart of the wrapper
+            tts.tts_to_file(
+                text=target_text,
+                speaker_wav=ref_wav_path,
+                language=xtts_lang,
+                file_path=syn_wav_path
+            )
+            inf_t = time.time() - start_t
+            
+            # Metric: RTF
+            audio_info = torchaudio.info(syn_wav_path)
+            audio_dur = audio_info.num_frames / audio_info.sample_rate
+            rtf = inf_t / audio_dur if audio_dur > 0 else np.nan
+            
+            # Metric: Similarity
+            ref_emb = extract_speaker_embedding(ref_wav_path, spk_model, device)
+            syn_emb = extract_speaker_embedding(syn_wav_path, spk_model, device)
+            sim_score = np.nan
+            if ref_emb is not None and syn_emb is not None:
+                sim_score = F.cosine_similarity(ref_emb.unsqueeze(0), syn_emb.unsqueeze(0)).item()
+            
+            # Metric: ASR
+            segments, _ = whisper.transcribe(
+                syn_wav_path,
+                beam_size=args.whisper_beam,
+                language=args.whisper_lang,
+                without_timestamps=True
+            )
+            transcription = " ".join([seg.text.strip() for seg in segments])
+            
+            try:
+                wer = jiwer.wer(target_text.lower(), transcription.lower())
+                cer = jiwer.cer(target_text.lower(), transcription.lower())
+            except Exception:
+                wer = np.nan
+                cer = np.nan
+            
+            metrics["wer"].append(wer)
+            metrics["cer"].append(cer)
+            metrics["sim"].append(sim_score)
+            metrics["inf_time"].append(inf_t)
+            metrics["rtf"].append(rtf)
+            
+            per_sample_log.append({
+                "id": i,
+                "target": target_text,
+                "pred": transcription,
+                "wer": wer,
+                "cer": cer,
+                "sim": sim_score,
+                "inf_time": inf_t,
+                "rtf": rtf
+            })
+            
         except Exception as e:
-            print(f"   ⚠ Metrics failed for sample {s['idx']}: {e}")
-            w = c = None
+            print(f"Error on row {i}: {e}")
 
-        if os.path.exists(s["ref_path"]): os.remove(s["ref_path"])
+    # Aggregating
+    summary = {
+        "wer": safe_mean(metrics["wer"]),
+        "cer": safe_mean(metrics["cer"]),
+        "sim": safe_mean(metrics["sim"]),
+        "inf_time": safe_mean(metrics["inf_time"]),
+        "rtf": safe_mean(metrics["rtf"]),
+    }
+    
+    print("\n==============================================================")
+    print("  XTTS EVALUATION COMPLETE")
+    print(f"  Target: {args.whisper_lang} | Samples: {safe_count(metrics['wer'])}")
+    print("==============================================================")
+    print(f"  WER        : {summary['wer']:.4f}")
+    print(f"  CER        : {summary['cer']:.4f}")
+    print(f"  Similarity : {summary['sim']:.4f}")
+    print(f"  InferenceS : {summary['inf_time']:.4f}")
+    print(f"  RTF        : {summary['rtf']:.4f}")
+    print("==============================================================\n")
 
-        results.append({
-            "idx": s["idx"], "WER": w, "CER": c, "Similarity": sim,
-            "InferenceS": s["inference_s"], "AudioDurS": s["audio_dur_s"], "RTF": s["rtf"],
-            "transcript": tx, "reference": s["text_target"]
-        })
-
-    # Summary
-    metric_keys = ["WER", "CER", "Similarity", "InferenceS", "RTF"]
-    overall = {k: {"mean": safe_mean([r[k] for r in results]), "std": safe_std([r[k] for r in results]), "valid": safe_count([r[k] for r in results])} for k in metric_keys}
-
-    print("\n" + "=" * 62)
-    print("  XTTS-v2 EVALUATION COMPLETE")
-    print(f"  Target: {target_lang} | Samples: {len(results)}")
-    print("=" * 62)
-    print(f"  {'Metric':<16} {'Mean':>9} {'± Std':>9}  {'Valid':>6}")
-    print("-" * 62)
-    for k in metric_keys:
-        m, s, v = overall[k]["mean"], overall[k]["std"], overall[k]["valid"]
-        print(f"  {k:<16} {m:>9.4f} {f'±{s:.4f}' if not np.isnan(s) else '':>9}  {v:>3}/{len(results)}")
-    print("=" * 62)
-
-    # Save summary
-    with open(os.path.join(args.output_dir, "eval_summary.json"), "w") as f:
-        json.dump(overall, f, indent=2)
-
-    # Save per-sample CSV
     csv_path = os.path.join(args.output_dir, "eval_per_sample.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["idx", "WER", "CER", "Similarity", "InferenceS", "AudioDurS", "RTF", "reference", "transcript"])
-        writer.writeheader()
-        writer.writerows(results)
-    print(f"\n  Per-sample results saved to {csv_path}")
-
-    # Final cleanup
-    if os.path.exists(temp_ref_dir):
-        import shutil
-        shutil.rmtree(temp_ref_dir)
+    with open(csv_path, "w", newline="", encoding="utf8") as f:
+        w = csv.DictWriter(f, fieldnames=["id", "target", "pred", "wer", "cer", "sim", "inf_time", "rtf"])
+        w.writeheader()
+        w.writerows(per_sample_log)
+        
+    print(f"Saved results to {csv_path}")
 
 if __name__ == "__main__":
     main()
