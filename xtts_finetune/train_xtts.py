@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-XTTS v2 Fine-Tuning Script
-Initializes the Coqui Trainer API to fine-tune the XTTS model on our 
-curated Best-of-N dataset (French, Arabic, Chinese).
+XTTS v2 LoRA Fine-Tuning Script
+================================
+Uses PEFT LoRA adapters on the GPT decoder only, following the approach from
+gokhaneraslan/XTTS_V2-finetuning. This prevents catastrophic forgetting by
+freezing the entire base model and only training small low-rank adapter matrices
+on the GPT attention/feedforward layers.
+
+Reference: https://github.com/gokhaneraslan/XTTS_V2-finetuning
 """
 
 import os
+import sys
 import argparse
 from trainer import Trainer, TrainerArgs
 from TTS.config.shared_configs import BaseDatasetConfig
@@ -17,14 +23,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-path", required=True, help="Path to the prepared xtts_dataset directory")
     parser.add_argument("--output-path", required=True, help="Path to save checkpoints")
-    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size (keep small for XTTS!)")
+    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
+    parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank (lower = less params, higher = more expressive)")
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha scaling factor")
     args = parser.parse_args()
 
     os.makedirs(args.output_path, exist_ok=True)
 
     # 1. Download Base XTTS v2 Model
-    print("📥 Downloading Base XTTS v2 model files (vocab, model, dvae, mel_stats)...")
+    print("📥 Downloading Base XTTS v2 model files...")
     CHECKPOINTS_OUT_PATH = os.path.join(args.output_path, "base_model_files")
     os.makedirs(CHECKPOINTS_OUT_PATH, exist_ok=True)
 
@@ -44,7 +52,7 @@ def main():
             CHECKPOINTS_OUT_PATH, progress_bar=True
         )
 
-    # Note: Chinese language tag in XTTS is "zh-cn"
+    # 2. Register multilingual datasets
     lang_map = {"fr": "fr", "ar": "ar", "zh": "zh-cn"}
     dataset_configs = []
     
@@ -61,16 +69,16 @@ def main():
             )
             print(f"📖 Registered dataset for {xtts_lang}")
 
-    # init args and config
+    # 3. Model args (identical to official Coqui recipe)
     model_args = GPTArgs(
         max_conditioning_length=132300,  # 6 secs
-        min_conditioning_length=66150,  # 3 secs
+        min_conditioning_length=66150,   # 3 secs
         debug_loading_failures=False,
-        max_wav_length=255995,  # ~11.6 seconds
+        max_wav_length=255995,           # ~11.6 seconds
         max_text_length=200,
         mel_norm_file=MEL_NORM_FILE,
         dvae_checkpoint=DVAE_CHECKPOINT,
-        xtts_checkpoint=XTTS_CHECKPOINT,  # checkpoint path of the model that you want to fine-tune
+        xtts_checkpoint=XTTS_CHECKPOINT,
         tokenizer_file=TOKENIZER_FILE,
         gpt_num_audio_tokens=1026,
         gpt_start_audio_token=1024,
@@ -81,6 +89,7 @@ def main():
     
     audio_config = XttsAudioConfig(sample_rate=22050, dvae_sample_rate=22050, output_sample_rate=24000)
 
+    # Find a speaker wav for test sentences
     sample_speaker_wav = None
     wavs_dir = os.path.join(args.dataset_path, "wavs")
     if os.path.exists(wavs_dir):
@@ -88,12 +97,13 @@ def main():
         if wav_files:
             sample_speaker_wav = os.path.join(wavs_dir, wav_files[0])
 
+    # 4. Training config — following official recipe + gokhaneraslan's LoRA config
     config = GPTTrainerConfig(
         output_path=args.output_path,
         model_args=model_args,
-        run_name="xtts_finetuned",
-        project_name="xtts_finetune",
-        run_description="GPT XTTS fine-tuning on multilingual dataset",
+        run_name="xtts_lora_finetuned",
+        project_name="xtts_lora_finetune",
+        run_description="LoRA XTTS fine-tuning on multilingual Best-of-N dataset",
         dashboard_logger="tensorboard",
         audio=audio_config,
         batch_size=args.batch_size,
@@ -101,43 +111,55 @@ def main():
         eval_batch_size=args.batch_size,
         num_loader_workers=8,
         eval_split_max_size=256,
-        print_step=25,
+        epochs=args.epochs,
+        print_step=50,
         plot_step=100,
         log_model_step=1000,
-        save_step=500,
+        save_step=10000,
         save_n_checkpoints=2,
         save_checkpoints=True,
         print_eval=False,
         optimizer="AdamW",
         optimizer_wd_only_on_weights=True,
         optimizer_params={"betas": [0.9, 0.96], "eps": 1e-8, "weight_decay": 1e-2},
-        lr=1e-06,
+        lr=5e-06,
         lr_scheduler="MultiStepLR",
         lr_scheduler_params={"milestones": [50000 * 18, 150000 * 18, 300000 * 18], "gamma": 0.5, "last_epoch": -1},
         test_sentences=[
-            {"text": "Bonjour, ceci est un test de clonage vocal en français.", "speaker_wav": sample_speaker_wav, "language": "fr"}
+            {"text": "Bonjour, ceci est un test de clonage vocal en français.", "speaker_wav": sample_speaker_wav, "language": "fr"},
+            {"text": "هذا اختبار لاستنساخ الصوت باللغة العربية.", "speaker_wav": sample_speaker_wav, "language": "ar"},
         ],
         datasets=dataset_configs
     )
 
-    # 3. Initialize model and load pre-trained weights
-    print("🔧 Initializing GPTTrainer...")
+    # 5. Initialize base model
+    print("🔧 Initializing GPTTrainer base model...")
     model = GPTTrainer.init_from_config(config)
 
-    # CRITICAL: Freeze everything EXCEPT the GPT decoder to prevent catastrophic forgetting.
-    # Only the GPT layers (autoregressive text-to-mel mapping) should be finetuned.
-    frozen_count = 0
-    tuned_count = 0
-    for name, param in model.named_parameters():
-        if "gpt" in name.lower():
-            param.requires_grad = True
-            tuned_count += 1
-        else:
-            param.requires_grad = False
-            frozen_count += 1
-    print(f"🧊 Frozen {frozen_count} params | 🔥 Tuning {tuned_count} GPT params")
+    # 6. Apply LoRA adapters to the GPT decoder ONLY
+    # This is the critical fix: instead of full-param finetuning (which caused
+    # catastrophic forgetting and doubled WER from 0.073 -> 0.164), we inject
+    # tiny trainable matrices into the GPT attention layers.
+    # Reference: gokhaneraslan/XTTS_V2-finetuning/lora_train.py
+    print("🧬 Applying LoRA adapters to GPT decoder...")
+    from peft import LoraConfig, get_peft_model
+
+    peft_config = LoraConfig(
+        inference_mode=False,
+        r=args.lora_rank,           # rank 8: ~0.5% of total params trainable
+        lora_alpha=args.lora_alpha,  # scaling factor
+        lora_dropout=0.05,
+        target_modules=["c_attn", "c_proj", "c_fc"],  # GPT attention + FFN layers
+    )
+
+    # Apply LoRA ONLY to the GPT component, leaving DVAE/HiFi-GAN/conditioning frozen
+    model.xtts.gpt = get_peft_model(model.xtts.gpt, peft_config)
+
+    trainable_params, total_params = model.xtts.gpt.get_nb_trainable_parameters()
+    print(f"🔥 Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+    print(f"🧊 Total:     {total_params:,}")
     
-    # 4. Load dataset
+    # 7. Load dataset
     print("🔍 Loading dataset samples...")
     train_samples, eval_samples = load_tts_samples(
         dataset_configs, 
@@ -146,29 +168,34 @@ def main():
         eval_split_size=config.eval_split_size
     )
 
-    print(f"Total Train samples: {len(train_samples)}")
-    print(f"Total Eval samples: {len(eval_samples)}")
+    print(f"Total Train: {len(train_samples)} | Eval: {len(eval_samples)}")
 
-    # 5. Initialize Trainer
-    trainer_args = TrainerArgs(
-        restore_path=None,  # Checkpoint is restored via xtts_checkpoint in GPTArgs
-        skip_train_epoch=False,
-        start_with_eval=False,
-        grad_accum_steps=4,
-    )
-
+    # 8. Initialize Trainer (following official recipe: grad_accum=84)
     trainer = Trainer(
-        trainer_args,
+        TrainerArgs(
+            restore_path=None,
+            skip_train_epoch=False,
+            start_with_eval=True,
+            grad_accum_steps=84,  # official Coqui recipe value
+        ),
         config,
-        args.output_path,
+        output_path=args.output_path,
         model=model,
         train_samples=train_samples,
         eval_samples=eval_samples,
     )
 
-    # 6. Start Training
-    print("🚀 Starting XTTS fine-tuning...")
+    # 9. Train!
+    print("🚀 Starting LoRA XTTS fine-tuning...")
     trainer.fit()
+
+    # 10. Save LoRA adapter separately for easy loading
+    print("💾 Saving LoRA adapter...")
+    lora_output_dir = os.path.join(args.output_path, "lora_adapter")
+    os.makedirs(lora_output_dir, exist_ok=True)
+    model.xtts.gpt.save_pretrained(lora_output_dir)
+    config.save_json(os.path.join(lora_output_dir, "original_xtts_config.json"))
+    print(f"✅ LoRA adapter saved to {lora_output_dir}")
 
 if __name__ == "__main__":
     main()
