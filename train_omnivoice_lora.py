@@ -51,10 +51,7 @@ def main():
         lora_alpha=args.lora_alpha,
         target_modules=target_modules,
         lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-        # We save the specific OmniVoice heads fully to prevent shape mismatches / corruption
-        modules_to_save=["lm_head", "audio_head"] 
+        bias="none"
     )
 
     # Wrap the language model component (Qwen3) of OmniVoice
