@@ -155,10 +155,10 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "resume_from_checkpoint": null,
     "init_from_checkpoint": "k2-fsa/OmniVoice",
 
-    "learning_rate": 1e-5,
+    "learning_rate": 2e-6,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
-    "steps": 500,
+    "steps": 150,
     "seed": 42,
     "warmup_type": "ratio",
     "warmup_ratio": 0.05,
