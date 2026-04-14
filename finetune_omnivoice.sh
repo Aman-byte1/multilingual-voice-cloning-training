@@ -155,7 +155,7 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "resume_from_checkpoint": null,
     "init_from_checkpoint": "k2-fsa/OmniVoice",
 
-    "learning_rate": 2e-6,
+    "learning_rate": 1e-4,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
     "steps": 150,
@@ -212,7 +212,8 @@ export TORCHDYNAMO_DISABLE=1
 accelerate launch \
     --gpu_ids "${GPU_IDS}" \
     --num_processes ${NUM_GPUS} \
-    -m omnivoice.cli.train \
+    train_omnivoice_lora.py \
+    --lora_rank 32 \
     --train_config "${CONFIG_DIR}/train_config.json" \
     --data_config "${CONFIG_DIR}/data_config.json" \
     --output_dir "${OUTPUT_DIR}"
