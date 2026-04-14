@@ -23,7 +23,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-path", required=True, help="Path to the prepared xtts_dataset directory")
     parser.add_argument("--output-path", required=True, help="Path to save checkpoints")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=2, help="Number of training epochs (trainer counts from 0, so 2 = 1 real epoch)")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank (lower = less params, higher = more expressive)")
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha scaling factor")
@@ -172,7 +172,7 @@ def main():
         TrainerArgs(
             restore_path=None,
             skip_train_epoch=False,
-            start_with_eval=True,
+            start_with_eval=False,
             grad_accum_steps=16,  # 1392 steps / 16 = ~87 weight updates per epoch
         ),
         config,
