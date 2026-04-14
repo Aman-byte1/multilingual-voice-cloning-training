@@ -143,10 +143,11 @@ def main():
 
     peft_config = LoraConfig(
         inference_mode=False,
-        r=args.lora_rank,           # rank 8: ~0.5% of total params trainable
-        lora_alpha=args.lora_alpha,  # scaling factor
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
         lora_dropout=0.05,
-        target_modules=["c_attn", "c_proj", "c_fc"],  # GPT attention + FFN layers
+        # We add 'qkv' and 'proj_out' heavily used inside the conditioning_encoder!
+        target_modules=["c_attn", "c_proj", "c_fc", "qkv", "proj_out"],  
     )
 
     # Apply LoRA ONLY to the GPT component, leaving DVAE/HiFi-GAN/conditioning frozen
