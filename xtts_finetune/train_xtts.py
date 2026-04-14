@@ -146,8 +146,9 @@ def main():
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
         lora_dropout=0.05,
-        # We add 'qkv' and 'proj_out' heavily used inside the conditioning_encoder!
-        target_modules=["c_attn", "c_proj", "c_fc", "qkv", "proj_out"],  
+        # Reverted: We cannot target 'qkv' or 'proj_out' because Coqui implemented 
+        # the Conditioning Encoder using Conv1d instead of Linear layers!
+        target_modules=["c_attn", "c_proj", "c_fc"],  
     )
 
     # Apply LoRA ONLY to the GPT component, leaving DVAE/HiFi-GAN/conditioning frozen
