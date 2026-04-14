@@ -176,7 +176,7 @@ def main():
             restore_path=None,
             skip_train_epoch=False,
             start_with_eval=True,
-            grad_accum_steps=84,  # official Coqui recipe value
+            grad_accum_steps=16,  # 1392 steps / 16 = ~87 weight updates per epoch
         ),
         config,
         output_path=args.output_path,
