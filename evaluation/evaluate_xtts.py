@@ -33,7 +33,10 @@ warnings.filterwarnings("ignore")
 # ===================================================================
 
 def load_speaker_model(device="cuda"):
-    from speechbrain.inference.speaker import SpeakerRecognition
+    try:
+        from speechbrain.pretrained import SpeakerRecognition
+    except ImportError:
+        from speechbrain.inference.speaker import SpeakerRecognition
     return SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
