@@ -121,7 +121,7 @@ for split_name in train dev; do
         --tar_output_pattern "${TOKEN_DIR}/${split_name}/audios/shard-%06d.tar" \
         --jsonl_output_pattern "${TOKEN_DIR}/${split_name}/txts/shard-%06d.jsonl" \
         --tokenizer_path "${TOKENIZER_PATH}" \
-        --nj_per_gpu 3 \
+        --nj_per_gpu 1 \
         --shuffle True
 
     echo "  Done: ${TOKEN_DIR}/${split_name}/data.lst"
