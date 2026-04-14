@@ -25,9 +25,7 @@ source "$VENV_DIR/bin/activate"
 # Install Coqui TTS and matching dependencies
 echo "📦 Installing TTS==0.22.0 and locking dependencies..."
 pip install --upgrade pip
-pip install TTS==0.22.0
-# XTTS needs specific versions of these libraries or it will break TensorBoard / loading
-pip install numpy==1.22.0 soundfile librosa pandas datasets
+pip install TTS==0.22.0 "numpy>=1.24.3,<2.0.0" soundfile librosa pandas datasets
 # PyTorch matching the Coqui TTS requirement (usually Torch 2.1 or 2.2 is safe, but we'll let TTS figure it out, just force flash-attn if needed)
 
 echo "================================================================="
