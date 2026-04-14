@@ -141,6 +141,18 @@ def main():
     
     # We pass args.model_dir as the model_path because XTTS expects a directory
     tts = TTS(model_path=args.model_dir, config_path=config_path, progress_bar=False).to(device)
+    
+    # 🧬 Inject LoRA Adapter if it exists
+    lora_path = os.path.join(args.model_dir, "lora_adapter")
+    if not os.path.exists(lora_path):
+        lora_path = os.path.join(os.path.dirname(args.model_dir), "lora_adapter")
+        
+    if os.path.exists(lora_path):
+        print(f"🧬 Injecting LoRA adapter from: {lora_path}")
+        from peft import PeftModel
+        # The TTS wrapper holds the Xtts model in synthesizer.tts_model
+        tts.synthesizer.tts_model.gpt = PeftModel.from_pretrained(tts.synthesizer.tts_model.gpt, lora_path)
+        print("   ✅ LoRA adapter successfully attached to the GPT decoder!")
 
     print("🧠 Loading Faster-Whisper for ASR...")
     from faster_whisper import WhisperModel
