@@ -17,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-path", required=True, help="Path to the prepared xtts_dataset directory")
     parser.add_argument("--output-path", required=True, help="Path to save checkpoints")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size (keep small for XTTS!)")
     args = parser.parse_args()
 
@@ -104,14 +104,14 @@ def main():
         print_step=25,
         plot_step=100,
         log_model_step=1000,
-        save_step=2000,
-        save_n_checkpoints=1,
+        save_step=500,
+        save_n_checkpoints=2,
         save_checkpoints=True,
         print_eval=False,
         optimizer="AdamW",
         optimizer_wd_only_on_weights=True,
         optimizer_params={"betas": [0.9, 0.96], "eps": 1e-8, "weight_decay": 1e-2},
-        lr=5e-06,
+        lr=1e-06,
         lr_scheduler="MultiStepLR",
         lr_scheduler_params={"milestones": [50000 * 18, 150000 * 18, 300000 * 18], "gamma": 0.5, "last_epoch": -1},
         test_sentences=[
@@ -123,6 +123,19 @@ def main():
     # 3. Initialize model and load pre-trained weights
     print("🔧 Initializing GPTTrainer...")
     model = GPTTrainer.init_from_config(config)
+
+    # CRITICAL: Freeze everything EXCEPT the GPT decoder to prevent catastrophic forgetting.
+    # Only the GPT layers (autoregressive text-to-mel mapping) should be finetuned.
+    frozen_count = 0
+    tuned_count = 0
+    for name, param in model.named_parameters():
+        if "gpt" in name.lower():
+            param.requires_grad = True
+            tuned_count += 1
+        else:
+            param.requires_grad = False
+            frozen_count += 1
+    print(f"🧊 Frozen {frozen_count} params | 🔥 Tuning {tuned_count} GPT params")
     
     # 4. Load dataset
     print("🔍 Loading dataset samples...")
@@ -141,7 +154,7 @@ def main():
         restore_path=None,  # Checkpoint is restored via xtts_checkpoint in GPTArgs
         skip_train_epoch=False,
         start_with_eval=False,
-        grad_accum_steps=8,  # Helps simulate larger batch size
+        grad_accum_steps=4,
     )
 
     trainer = Trainer(

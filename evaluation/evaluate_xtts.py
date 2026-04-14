@@ -46,10 +46,14 @@ def extract_speaker_embedding(wav_path, model, device="cuda"):
         wav, sr = torchaudio.load(wav_path)
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
-        wav = wav.squeeze(0).to(device)  # mono
-        emb = model.encode_batch(wav.unsqueeze(0))
+        # Force mono: average channels if stereo
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.to(device)  # shape: [1, time]
+        emb = model.encode_batch(wav)
         return emb.squeeze(0).squeeze(0).detach()
-    except Exception:
+    except Exception as e:
+        print(f"  [sim warning] {wav_path}: {e}")
         return None
 
 def safe_mean(vals):
@@ -90,7 +94,6 @@ def main():
     ds = load_dataset(args.dataset, split=args.split)
     
     if args.max_samples:
-        ds = ds.select(range(min(len(ds), args.max_samples)))
         ds = ds.select(range(min(len(ds), args.max_samples)))
 
     print(f"   Samples: {len(ds)}")
