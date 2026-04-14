@@ -139,8 +139,9 @@ def main():
         except Exception as e:
             print(f"   Failed to recover vocab.json: {e}")
     
-    # We pass args.model_dir as the model_path because XTTS expects a directory
-    tts = TTS(model_path=args.model_dir, config_path=config_path, progress_bar=False).to(device)
+    # 🔧 To avoid PEFT state_dict corruption, we load the pristine official base model first, 
+    # and then attach our LoRA adapter on top of it.
+    tts = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False).to(device)
     
     # 🧬 Inject LoRA Adapter if it exists
     lora_path = os.path.join(args.model_dir, "lora_adapter")
