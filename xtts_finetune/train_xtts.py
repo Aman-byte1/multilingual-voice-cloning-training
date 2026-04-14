@@ -31,6 +31,8 @@ def main():
     model_path, config_path, model_item = manager.download_model(model_name)
 
     # 2. Load and override config
+    if config_path is None:
+        config_path = os.path.join(model_path, "config.json")
     config = XttsConfig()
     config.load_json(config_path)
     
