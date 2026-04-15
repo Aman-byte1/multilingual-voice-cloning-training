@@ -372,10 +372,17 @@ def main():
         logger.info("📦 Building dataloaders...")
         train_loader, eval_loader = build_dataloaders(config, tokenizer)
         
-        # Log dataset info
-        logger.info(f"  Train batches: {len(train_loader)}")
+        # Log dataset info. Iterable datasets in streaming mode may not define __len__.
+        try:
+            logger.info(f"  Train batches: {len(train_loader)}")
+        except TypeError:
+            logger.info("  Train batches: streaming dataset (length unavailable)")
+
         if eval_loader:
-            logger.info(f"  Eval batches: {len(eval_loader)}")
+            try:
+                logger.info(f"  Eval batches: {len(eval_loader)}")
+            except TypeError:
+                logger.info("  Eval batches: streaming dataset (length unavailable)")
         
         # Apply LoRA
         logger.info("🧬 Applying LoRA adapters...")
