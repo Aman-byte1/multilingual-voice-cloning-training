@@ -378,7 +378,7 @@ def main():
         except TypeError:
             logger.info("  Train batches: streaming dataset (length unavailable)")
 
-        if eval_loader:
+        if eval_loader is not None:
             try:
                 logger.info(f"  Eval batches: {len(eval_loader)}")
             except TypeError:
