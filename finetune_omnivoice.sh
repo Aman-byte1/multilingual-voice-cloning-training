@@ -169,8 +169,8 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "gradient_accumulation_steps": 16,
     "num_workers": 2,
 
-    "mixed_precision": "bf16",
-    "allow_tf32": true,
+    "mixed_precision": "no",
+    "allow_tf32": false,
 
     "logging_steps": 25,
     "eval_steps": 100,

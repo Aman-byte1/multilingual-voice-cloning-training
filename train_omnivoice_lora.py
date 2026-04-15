@@ -28,6 +28,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def ensure_torch_float8_compat() -> bool:
+    """Deprecated: kept for compatibility with older imports."""
+    return True
+
+
 def ensure_flex_attention_stub() -> bool:
     """Register a minimal flex_attention module for older torch builds.
 
@@ -179,6 +184,7 @@ def get_lora_config(args) -> LoraConfig:
         task_type=TaskType.CAUSAL_LM,
         use_rslora=args.use_rslora,
         init_lora_weights="gaussian",
+        autocast_adapter_dtype=False,
     )
     
     logger.info(f"LoRA Config: rank={config.r}, alpha={config.lora_alpha}, dropout={config.lora_dropout}")
@@ -387,7 +393,9 @@ def main():
         # Apply LoRA
         logger.info("🧬 Applying LoRA adapters...")
         lora_config = get_lora_config(args)
+        model.llm = model.llm.to(torch.float32)
         model.llm = get_peft_model(model.llm, lora_config)
+        model.llm = model.llm.to(torch.float32)
         
         # Freeze embeddings if requested
         if args.freeze_embeddings:
