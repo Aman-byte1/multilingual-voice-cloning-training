@@ -14,7 +14,7 @@ import os
 from typing import Iterable, List, Set
 
 import soundfile as sf
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 
 
 def parse_args():
@@ -79,6 +79,11 @@ def main():
     print(f"Loading dataset: {args.repo_id} [{args.split}]")
     ds = load_dataset(args.repo_id, split=args.split)
 
+    # Avoid runtime dependency on torchcodec when reading audio fields.
+    # We only need raw bytes/path and will decode with soundfile when needed.
+    if "best_audio" in ds.column_names:
+        ds = ds.cast_column("best_audio", Audio(decode=False))
+
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(args.jsonl_path) or ".", exist_ok=True)
 
@@ -102,6 +107,15 @@ def main():
 
         audio_array = audio_info.get("array")
         sample_rate = audio_info.get("sampling_rate")
+
+        # decode=False returns either bytes/path or already-decoded array/sr.
+        if audio_array is None or sample_rate is None:
+            if audio_info.get("bytes") is not None:
+                import io
+
+                audio_array, sample_rate = sf.read(io.BytesIO(audio_info["bytes"]))
+            elif audio_info.get("path"):
+                audio_array, sample_rate = sf.read(audio_info["path"])
         text = (row.get("text") or "").strip()
         language = (row.get("language") or "").strip().lower()
         sample_id = (row.get("id") or f"sample_{n_written:05d}").strip()
