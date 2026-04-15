@@ -138,16 +138,17 @@ def patch_omnivoice_block_mask() -> bool:
 
 
 
-                    _FLOAT8_ALIASES = [
-                        "float8_e4m3fn",
-                        "float8_e4m3fnuz",
-                        "float8_e5m2",
-                        "float8_e5m2fnuz",
-                        "float8_e8m0fnu",   # the one that actually crashed
-                    ]
-                    for _f8_name in _FLOAT8_ALIASES:
-                        if not hasattr(torch, _f8_name):
-                            setattr(torch, _f8_name, torch.float32)
+_FLOAT8_ALIASES = [
+    "float8_e4m3fn",
+    "float8_e4m3fnuz",
+    "float8_e5m2",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",   # the one that actually crashed
+]
+for _f8_name in _FLOAT8_ALIASES:
+    if not hasattr(torch, _f8_name):
+        setattr(torch, _f8_name, torch.float32)
+
 def verify_configs(train_config_path: str, data_config_path: str):
     """Verify that config files exist and are valid JSON."""
     import json
