@@ -116,7 +116,7 @@ for split_name in train dev; do
 
     echo "  Tokenizing ${split_name} from ${SPLIT_JSONL}..."
     CUDA_VISIBLE_DEVICES=${GPU_IDS} \
-        python -m omnivoice.scripts.extract_audio_tokens \
+        python extract_audio_tokens_compat.py \
         --input_jsonl "${SPLIT_JSONL}" \
         --tar_output_pattern "${TOKEN_DIR}/${split_name}/audios/shard-%06d.tar" \
         --jsonl_output_pattern "${TOKEN_DIR}/${split_name}/txts/shard-%06d.jsonl" \

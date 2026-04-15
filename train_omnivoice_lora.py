@@ -287,10 +287,10 @@ def main():
                        help="Alpha scaling (recommended: 2 * rank)")
     parser.add_argument("--lora_dropout", type=float, default=0.05,
                        help="Dropout rate for LoRA layers")
-    parser.add_argument("--lr", type=float, default=2e-5,
-                       help="Learning rate override")
-    parser.add_argument("--steps", type=int, default=1500,
-                       help="Training steps override")
+    parser.add_argument("--lr", type=float, default=None,
+                       help="Learning rate override (defaults to train_config value)")
+    parser.add_argument("--steps", type=int, default=None,
+                       help="Training steps override (defaults to train_config value)")
     parser.add_argument("--use_rslora", action="store_true",
                        help="Use Rank-Stabilized LoRA for better training stability")
     parser.add_argument("--target_audio_modules", action="store_true",
@@ -344,6 +344,15 @@ def main():
         config.output_dir = args.output_dir
         config.data_config = args.data_config
         
+        # Apply explicit CLI overrides when provided.
+        if args.lr is not None:
+            logger.info(f"Overriding learning rate: {config.learning_rate} -> {args.lr}")
+            config.learning_rate = args.lr
+
+        if args.steps is not None:
+            logger.info(f"Overriding steps: {config.steps} -> {args.steps}")
+            config.steps = args.steps
+
         # Apply VRAM optimizations
         config = optimize_for_vram(config, args.vram_level)
         
