@@ -287,6 +287,10 @@ def main():
                        help="Alpha scaling (recommended: 2 * rank)")
     parser.add_argument("--lora_dropout", type=float, default=0.05,
                        help="Dropout rate for LoRA layers")
+    parser.add_argument("--lr", type=float, default=2e-5,
+                       help="Learning rate override")
+    parser.add_argument("--steps", type=int, default=1500,
+                       help="Training steps override")
     parser.add_argument("--use_rslora", action="store_true",
                        help="Use Rank-Stabilized LoRA for better training stability")
     parser.add_argument("--target_audio_modules", action="store_true",
