@@ -6,7 +6,7 @@ Some torch builds (including many A40 container images) do not ship
 -time, so we install a minimal shim before running the extractor module.
 """
 
-import runpy
+import importlib
 import sys
 import types
 
@@ -59,4 +59,5 @@ def ensure_flex_attention_stub() -> None:
 if __name__ == "__main__":
     ensure_flex_attention_stub()
     sys.argv = ["omnivoice.scripts.extract_audio_tokens", *sys.argv[1:]]
-    runpy.run_module("omnivoice.scripts.extract_audio_tokens", run_name="__main__")
+    module = importlib.import_module("omnivoice.scripts.extract_audio_tokens")
+    module.main()
