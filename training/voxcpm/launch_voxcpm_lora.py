@@ -46,6 +46,8 @@ def ensure_pretrained_path(pretrained_path: str, hf_model_id: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Launch VoxCPM LoRA fine-tuning")
     parser.add_argument("--voxcpm-root", default="./third_party/VoxCPM")
+    parser.add_argument("--voxcpm-repo", default="https://github.com/OpenBMB/VoxCPM.git")
+    parser.add_argument("--no-auto-clone", action="store_true")
     parser.add_argument("--pretrained-path", default="", help="Local VoxCPM model directory")
     parser.add_argument("--hf-model-id", default="openbmb/VoxCPM2")
     parser.add_argument("--train-manifest", required=True)
@@ -75,6 +77,17 @@ def main() -> None:
     args = parser.parse_args()
 
     voxcpm_root = os.path.abspath(os.path.expanduser(args.voxcpm_root))
+
+    if not os.path.isdir(voxcpm_root):
+        if args.no_auto_clone:
+            raise FileNotFoundError(
+                f"VoxCPM root does not exist: {voxcpm_root}. "
+                "Create it manually or remove --no-auto-clone."
+            )
+        os.makedirs(os.path.dirname(voxcpm_root), exist_ok=True)
+        print(f"Cloning VoxCPM into {voxcpm_root} ...")
+        subprocess.run(["git", "clone", args.voxcpm_repo, voxcpm_root], check=True)
+
     train_script = os.path.join(voxcpm_root, "scripts", "train_voxcpm_finetune.py")
     if not os.path.isfile(train_script):
         raise FileNotFoundError(

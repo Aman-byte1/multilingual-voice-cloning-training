@@ -56,6 +56,11 @@ def main() -> None:
     parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument("--score-fields", default="score,similarity")
     parser.add_argument(
+        "--reject-missing-score",
+        action="store_true",
+        help="If set, samples with no score field will be rejected when --min-score is used",
+    )
+    parser.add_argument(
         "--text-fields",
         default="trg_zh_text,text_zh,text",
         help="Comma-separated candidate text fields in priority order",
@@ -94,6 +99,7 @@ def main() -> None:
         "target_audio": 0,
         "ref_audio": 0,
         "score": 0,
+        "missing_score": 0,
     }
 
     for idx in tqdm(range(len(ds)), desc="Preparing"):
@@ -109,7 +115,13 @@ def main() -> None:
                 except Exception:
                     pass
         if score is None:
-            score = 0.0
+            rejected["missing_score"] += 1
+            if args.reject_missing_score:
+                rejected["score"] += 1
+                continue
+            # Keep sample when score is unavailable unless explicitly requested.
+            score = args.min_score
+
         if score < args.min_score:
             rejected["score"] += 1
             continue
