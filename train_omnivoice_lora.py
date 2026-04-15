@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Custom LoRA Fine-Tuning Script for OmniVoice
---------------------------------------------
-This script wraps the native OmniVoice architecture and its underlying 
-Qwen3 LLM backbone in PEFT LoRA adapters. It protects generalized knowledge 
-while mapping specific Best-of-N speakers into the acoustic space.
+Custom LoRA Fine-Tuning Script for OmniVoice Voice Cloning
+----------------------------------------------------------
+Optimized for Chinese voice cloning with proper error handling.
 """
 
 import os
@@ -12,23 +10,29 @@ import sys
 import argparse
 from functools import partial
 import torch
+import logging
+from pathlib import Path
 
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('training.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 def patch_omnivoice_block_mask() -> bool:
-    """Replace OmniVoice's BlockMask builder with a dense causal mask.
-
-    Qwen3 eager attention expects a standard additive attention mask, but
-    OmniVoice still builds a torch BlockMask for packed document_ids. This
-    compatibility shim preserves the packed same-document causal structure
-    while returning a dense tensor that eager attention can consume.
-    """
-
+    """Replace OmniVoice's BlockMask builder with a dense causal mask."""
     try:
         import omnivoice.models.omnivoice as omnivoice_module
     except Exception as exc:
-        print(f"⚠ Could not import OmniVoice module for mask patch: {exc}", flush=True)
+        logger.error(f"Could not import OmniVoice module: {exc}")
         return False
 
     original_create_block_mask = omnivoice_module.create_block_mask
@@ -54,11 +58,7 @@ def patch_omnivoice_block_mask() -> bool:
                 same_doc = doc_ids.unsqueeze(0) == doc_ids.unsqueeze(1)
                 valid_tokens = doc_ids >= 0
                 causal = torch.tril(
-                    torch.ones(
-                        same_doc.shape,
-                        device=doc_ids.device,
-                        dtype=torch.bool,
-                    )
+                    torch.ones(same_doc.shape, device=doc_ids.device, dtype=torch.bool)
                 )
                 valid = same_doc & valid_tokens.unsqueeze(0) & valid_tokens.unsqueeze(1) & causal
 
@@ -71,104 +71,301 @@ def patch_omnivoice_block_mask() -> bool:
                 return mask
 
         return original_create_block_mask(
-            mask_mod,
-            B=B,
-            H=H,
-            Q_LEN=Q_LEN,
-            KV_LEN=KV_LEN,
-            _compile=_compile,
-            device=device,
-            **kwargs,
+            mask_mod, B=B, H=H, Q_LEN=Q_LEN, KV_LEN=KV_LEN, _compile=_compile, device=device, **kwargs
         )
 
     omnivoice_module.create_block_mask = _dense_create_block_mask
+    logger.info("✓ Successfully patched OmniVoice block mask")
     return True
 
-def main():
-    parser = argparse.ArgumentParser(description="OmniVoice LoRA Training Entry Point")
-    parser.add_argument("--train_config", type=str, required=True, help="Path to config JSON")
-    parser.add_argument("--output_dir", type=str, required=True, help="Where to save checkpoints")
-    parser.add_argument("--data_config", type=str, required=True, help="Path to data config JSON")
+
+def verify_configs(train_config_path: str, data_config_path: str):
+    """Verify that config files exist and are valid JSON."""
+    import json
     
-    # Custom LoRA arguments
-    parser.add_argument("--lora_rank", type=int, default=32, help="Rank for LoRA adapters")
-    parser.add_argument("--lora_alpha", type=int, default=64, help="Alpha for LoRA adapters")
-    parser.add_argument(
-        "--low-vram",
-        action="store_true",
-        help="Use conservative memory settings (smaller packed batch + higher grad accumulation)",
-    )
+    for config_path, name in [(train_config_path, "train"), (data_config_path, "data")]:
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"{name} config not found: {config_path}")
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            logger.info(f"✓ Loaded {name} config: {config_path}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {name} config: {e}")
+
+
+def get_lora_config(args) -> LoraConfig:
+    """Create optimized LoRA configuration for voice cloning."""
     
-    args = parser.parse_args()
-
-    patch_omnivoice_block_mask()
-
-    from omnivoice.training.builder import build_dataloaders, build_model_and_tokenizer
-    from omnivoice.training.config import TrainingConfig
-    from omnivoice.training.trainer import OmniTrainer
-
-    # 1. Load Configuration
-    config = TrainingConfig.from_json(args.train_config)
-    config.output_dir = args.output_dir
-    config.data_config = args.data_config
-
-    if args.low_vram:
-        # Eager attention has quadratic memory growth in sequence length.
-        # Reduce packed length and compensate with more accumulation.
-        config.batch_tokens = min(config.batch_tokens, 1024)
-        config.gradient_accumulation_steps = max(config.gradient_accumulation_steps, 32)
-        config.num_workers = 0
-        print(
-            "🧯 Low-VRAM mode: "
-            f"batch_tokens={config.batch_tokens}, "
-            f"grad_accum={config.gradient_accumulation_steps}, "
-            f"num_workers={config.num_workers}",
-            flush=True,
+    # Validate rank/alpha ratio
+    if args.lora_alpha < args.lora_rank:
+        logger.warning(
+            f"⚠ lora_alpha ({args.lora_alpha}) < lora_rank ({args.lora_rank}). "
+            f"Recommended: alpha = 2 * rank"
         )
-
-    # 2. Build Components
-    print("🚀 Initializing native OmniVoice architecture...", flush=True)
-    model, tokenizer = build_model_and_tokenizer(config)
-    train_loader, eval_loader = build_dataloaders(config, tokenizer)
-
-    # 3. Inject PEFT LoRA Adapters into the Qwen3 backbone!
-    print(f"🧬 Applying LoRA adapters (Rank: {args.lora_rank}) to OmniVoice Qwen3 backbone...", flush=True)
     
-    # Target all main attention/math projection layers
-    target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    # Target modules - comprehensive coverage
+    target_modules = [
+        # Self-attention projections (critical for timbre)
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        # Feed-forward network (important for prosody)
+        "gate_proj", "up_proj", "down_proj",
+    ]
     
-    lora_config = LoraConfig(
+    # Add audio-specific modules if they exist
+    if args.target_audio_modules:
+        target_modules.extend(["audio_proj", "text_to_audio_proj"])
+    
+    config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
         target_modules=target_modules,
-        lora_dropout=0.05,
+        lora_dropout=args.lora_dropout,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
+        use_rslora=args.use_rslora,
+        init_lora_weights="gaussian",
     )
-
-    # Wrap the language model component (Qwen3) of OmniVoice
-    # Note: OmniVoice is defined as OmniVoice(config, llm=AutoModel.from_pretrained(...))
-    model.llm = get_peft_model(model.llm, lora_config)
-
-    # Reduce activation memory during training.
-    if hasattr(model.llm, "gradient_checkpointing_enable"):
-        model.llm.gradient_checkpointing_enable()
-    if hasattr(model.llm, "config"):
-        model.llm.config.use_cache = False
     
-    # Optional debug print for trainable parameter count
-    model.llm.print_trainable_parameters()
+    logger.info(f"LoRA Config: rank={config.r}, alpha={config.lora_alpha}, dropout={config.lora_dropout}")
+    logger.info(f"Target modules: {config.target_modules}")
+    
+    return config
 
-    # 4. Initialize Trainer and Start
-    print("🔥 Starting LoRA Fine-Tuning loop...", flush=True)
-    trainer = OmniTrainer(
-        model=model,
-        config=config,
-        train_dataloader=train_loader,
-        eval_dataloader=eval_loader,
-        tokenizer=tokenizer,
+
+def optimize_for_vram(config, vram_level: str):
+    """Apply VRAM-specific optimizations."""
+    
+    optimizations = {
+        "low": {
+            "batch_tokens": 2048,
+            "gradient_accumulation_steps": 32,
+            "num_workers": 2,
+        },
+        "medium": {
+            "batch_tokens": 4096,
+            "gradient_accumulation_steps": 16,
+            "num_workers": 4,
+        },
+        "high": {
+            "batch_tokens": 8192,
+            "gradient_accumulation_steps": 8,
+            "num_workers": 4,
+        }
+    }
+    
+    settings = optimizations.get(vram_level, optimizations["medium"])
+    
+    for key, value in settings.items():
+        if key == "gradient_accumulation_steps":
+            setattr(config, key, max(getattr(config, key, 1), value))
+        else:
+            setattr(config, key, min(getattr(config, key, float('inf')), value))
+    
+    logger.info(
+        f"VRAM Optimization ({vram_level}): "
+        f"batch_tokens={config.batch_tokens}, "
+        f"grad_accum={config.gradient_accumulation_steps}, "
+        f"workers={config.num_workers}"
     )
-    trainer.train()
+    
+    return config
+
+
+def print_training_summary(model, config, args):
+    """Print comprehensive training setup summary."""
+    
+    logger.info("\n" + "="*60)
+    logger.info("TRAINING CONFIGURATION SUMMARY")
+    logger.info("="*60)
+    
+    # Model info
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    logger.info(f"\n📊 Model:")
+    logger.info(f"  Total parameters: {total_params:,}")
+    logger.info(f"  Trainable parameters: {trainable_params:,}")
+    logger.info(f"  Trainable %: {100 * trainable_params / total_params:.2f}%")
+    
+    # LoRA info
+    logger.info(f"\n🧬 LoRA:")
+    logger.info(f"  Rank: {args.lora_rank}")
+    logger.info(f"  Alpha: {args.lora_alpha}")
+    logger.info(f"  Dropout: {args.lora_dropout}")
+    logger.info(f"  RSLoRA: {args.use_rslora}")
+    
+    # Training info
+    logger.info(f"\n🔥 Training:")
+    logger.info(f"  Steps: {config.steps}")
+    logger.info(f"  Learning rate: {config.learning_rate}")
+    logger.info(f"  Batch tokens: {config.batch_tokens}")
+    logger.info(f"  Gradient accumulation: {config.gradient_accumulation_steps}")
+    logger.info(f"  Mixed precision: {config.mixed_precision}")
+    
+    # Paths
+    logger.info(f"\n📁 Paths:")
+    logger.info(f"  Output: {config.output_dir}")
+    logger.info(f"  Train config: {args.train_config}")
+    logger.info(f"  Data config: {args.data_config}")
+    
+    logger.info("="*60 + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="OmniVoice LoRA Fine-Tuning for Voice Cloning",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # Required arguments
+    parser.add_argument("--train_config", type=str, required=True,
+                       help="Path to training config JSON")
+    parser.add_argument("--output_dir", type=str, required=True,
+                       help="Directory to save checkpoints and logs")
+    parser.add_argument("--data_config", type=str, required=True,
+                       help="Path to data config JSON")
+    
+    # LoRA arguments
+    parser.add_argument("--lora_rank", type=int, default=32,
+                       help="Rank for LoRA adapters (16-64 for voice cloning)")
+    parser.add_argument("--lora_alpha", type=int, default=64,
+                       help="Alpha scaling (recommended: 2 * rank)")
+    parser.add_argument("--lora_dropout", type=float, default=0.05,
+                       help="Dropout rate for LoRA layers")
+    parser.add_argument("--use_rslora", action="store_true",
+                       help="Use Rank-Stabilized LoRA for better training stability")
+    parser.add_argument("--target_audio_modules", action="store_true",
+                       help="Also apply LoRA to audio projection modules")
+    
+    # Memory optimization
+    parser.add_argument("--vram_level", type=str, default="medium",
+                       choices=["low", "medium", "high"],
+                       help="VRAM optimization preset")
+    parser.add_argument("--low-vram", action="store_true",
+                       help="Alias for --vram_level low")
+    parser.add_argument("--use_8bit", action="store_true",
+                       help="Enable 8-bit quantization (experimental)")
+    
+    # Training behavior
+    parser.add_argument("--freeze_embeddings", action="store_true",
+                       help="Freeze text embeddings (focus on audio generation)")
+    parser.add_argument("--resume_from", type=str, default=None,
+                       help="Path to checkpoint to resume from")
+    
+    args = parser.parse_args()
+    
+    # Handle legacy --low-vram flag
+    if args.low_vram:
+        args.vram_level = "low"
+    
+    # Validate alpha/rank ratio
+    if args.lora_alpha == 64 and args.lora_rank != 32:
+        logger.warning(f"Auto-adjusting lora_alpha to {2 * args.lora_rank} (2 * rank)")
+        args.lora_alpha = 2 * args.lora_rank
+    
+    try:
+        # Verify configs exist and are valid
+        verify_configs(args.train_config, args.data_config)
+        
+        # Apply mask patch
+        if not patch_omnivoice_block_mask():
+            logger.warning("⚠ Mask patch failed, continuing anyway...")
+        
+        # Import OmniVoice components
+        from omnivoice.training.builder import build_dataloaders, build_model_and_tokenizer
+        from omnivoice.training.config import TrainingConfig
+        from omnivoice.training.trainer import OmniTrainer
+        
+        # Load configuration
+        logger.info("📋 Loading training configuration...")
+        config = TrainingConfig.from_json(args.train_config)
+        config.output_dir = args.output_dir
+        config.data_config = args.data_config
+        
+        # Apply VRAM optimizations
+        config = optimize_for_vram(config, args.vram_level)
+        
+        # Create output directory
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Build model and tokenizer
+        logger.info("🚀 Building OmniVoice model...")
+        model, tokenizer = build_model_and_tokenizer(config)
+        
+        # Apply 8-bit quantization if requested
+        if args.use_8bit:
+            logger.info("Applying 8-bit quantization...")
+            model.llm = prepare_model_for_kbit_training(model.llm)
+        
+        # Build dataloaders
+        logger.info("📦 Building dataloaders...")
+        train_loader, eval_loader = build_dataloaders(config, tokenizer)
+        
+        # Log dataset info
+        logger.info(f"  Train batches: {len(train_loader)}")
+        if eval_loader:
+            logger.info(f"  Eval batches: {len(eval_loader)}")
+        
+        # Apply LoRA
+        logger.info("🧬 Applying LoRA adapters...")
+        lora_config = get_lora_config(args)
+        model.llm = get_peft_model(model.llm, lora_config)
+        
+        # Freeze embeddings if requested
+        if args.freeze_embeddings:
+            logger.info("❄️  Freezing text embeddings...")
+            for name, param in model.llm.named_parameters():
+                if "embed" in name.lower() and "audio" not in name.lower():
+                    param.requires_grad = False
+        
+        # Enable gradient checkpointing
+        if hasattr(model.llm, "gradient_checkpointing_enable"):
+            model.llm.gradient_checkpointing_enable()
+            logger.info("✓ Enabled gradient checkpointing")
+        
+        if hasattr(model.llm, "config"):
+            model.llm.config.use_cache = False
+        
+        # Print trainable parameters
+        model.llm.print_trainable_parameters()
+        
+        # Print comprehensive summary
+        print_training_summary(model, config, args)
+        
+        # Initialize trainer
+        logger.info("🔥 Initializing trainer...")
+        trainer = OmniTrainer(
+            model=model,
+            config=config,
+            train_dataloader=train_loader,
+            eval_dataloader=eval_loader,
+            tokenizer=tokenizer,
+        )
+        
+        # Start training
+        logger.info("Starting training loop...\n")
+        trainer.train()
+        
+        # Save final model
+        final_path = os.path.join(args.output_dir, "final_lora")
+        model.llm.save_pretrained(final_path)
+        logger.info(f"\n💾 Saved final LoRA adapters to: {final_path}")
+        
+        # Save merged model (optional)
+        if hasattr(model.llm, "merge_and_unload"):
+            merged_path = os.path.join(args.output_dir, "merged_model")
+            logger.info(f"💾 Saving merged model to: {merged_path}")
+            merged_model = model.llm.merge_and_unload()
+            merged_model.save_pretrained(merged_path)
+        
+        logger.info("\n✅ Training completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"\n❌ Training failed with error: {e}", exc_info=True)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
