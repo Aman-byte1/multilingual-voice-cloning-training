@@ -7,6 +7,7 @@ This script writes a YAML config compatible with:
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -41,6 +42,25 @@ def ensure_pretrained_path(pretrained_path: str, hf_model_id: str) -> str:
     print(f"Downloading model snapshot for {hf_model_id} ...")
     local_dir = snapshot_download(repo_id=hf_model_id, repo_type="model")
     return local_dir
+
+
+def ensure_python_dependencies(voxcpm_root: str) -> None:
+    # Train script requires these modules; install only when missing.
+    required = ["argbind", "tensorboardX", "yaml"]
+    missing = [m for m in required if importlib.util.find_spec(m) is None]
+    if not missing:
+        return
+
+    print(f"Installing missing Python deps: {missing}")
+    req_file = os.path.join(voxcpm_root, "requirements.txt")
+    if os.path.isfile(req_file):
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file], check=True)
+
+    # Ensure core runtime deps are present even if not pinned in requirements.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "argbind", "tensorboardX", "safetensors"],
+        check=True,
+    )
 
 
 def main() -> None:
@@ -94,6 +114,8 @@ def main() -> None:
             f"VoxCPM training script not found: {train_script}. "
             f"Clone OpenBMB/VoxCPM into --voxcpm-root first."
         )
+
+    ensure_python_dependencies(voxcpm_root)
 
     train_manifest = os.path.abspath(os.path.expanduser(args.train_manifest))
     if not os.path.isfile(train_manifest):

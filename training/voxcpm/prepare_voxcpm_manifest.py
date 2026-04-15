@@ -30,13 +30,65 @@ def first_non_empty(row: dict, keys: Iterable[str]):
     return None
 
 
-def save_wav(audio_field: dict, out_path: str) -> None:
-    arr = np.asarray(audio_field["array"], dtype=np.float32)
-    sr = int(audio_field["sampling_rate"])
-    wav = torch.from_numpy(arr).float()
-    if wav.dim() == 1:
-        wav = wav.unsqueeze(0)
+def _looks_like_audio(v) -> bool:
+    if isinstance(v, dict):
+        if "array" in v and "sampling_rate" in v:
+            return True
+        if "path" in v and v["path"]:
+            return True
+    if isinstance(v, str) and v:
+        return True
+    return False
+
+
+def pick_audio_field(row: dict, candidates: list[str], role: str):
+    # 1) Try explicit user-provided candidates first.
+    for k in candidates:
+        if _looks_like_audio(row.get(k)):
+            return row.get(k), k
+
+    # 2) Fallback heuristic scan for unknown schemas.
+    role_tokens = ["ref", "prompt", "source", "src"] if role == "ref" else ["trg", "target", "tts", "gen"]
+    for k, v in row.items():
+        lk = str(k).lower()
+        if not _looks_like_audio(v):
+            continue
+        if "audio" in lk or "voice" in lk or lk.endswith("_wav"):
+            if role == "target" and any(tok in lk for tok in role_tokens):
+                return v, k
+            if role == "ref" and any(tok in lk for tok in role_tokens):
+                return v, k
+
+    # 3) Last resort: any audio-like field.
+    for k, v in row.items():
+        if _looks_like_audio(v):
+            return v, k
+
+    return None, None
+
+
+def save_wav(audio_field, out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    if isinstance(audio_field, dict) and "array" in audio_field and "sampling_rate" in audio_field:
+        arr = np.asarray(audio_field["array"], dtype=np.float32)
+        sr = int(audio_field["sampling_rate"])
+        wav = torch.from_numpy(arr).float()
+        if wav.dim() == 1:
+            wav = wav.unsqueeze(0)
+        torchaudio.save(out_path, wav, sample_rate=sr)
+        return
+
+    src_path = None
+    if isinstance(audio_field, dict) and audio_field.get("path"):
+        src_path = audio_field["path"]
+    elif isinstance(audio_field, str):
+        src_path = audio_field
+
+    if src_path is None:
+        raise ValueError(f"Unsupported audio field format: {type(audio_field)}")
+
+    wav, sr = torchaudio.load(src_path)
     torchaudio.save(out_path, wav, sample_rate=sr)
 
 
@@ -94,6 +146,8 @@ def main() -> None:
     os.makedirs(ref_dir, exist_ok=True)
 
     rows = []
+    chosen_target_fields = {}
+    chosen_ref_fields = {}
     rejected = {
         "text": 0,
         "target_audio": 0,
@@ -132,15 +186,17 @@ def main() -> None:
             rejected["text"] += 1
             continue
 
-        target_audio = first_non_empty(item, target_audio_fields)
-        if not isinstance(target_audio, dict) or "array" not in target_audio:
+        target_audio, target_key = pick_audio_field(item, target_audio_fields, role="target")
+        if target_audio is None:
             rejected["target_audio"] += 1
             continue
+        chosen_target_fields[target_key or "<unknown>"] = chosen_target_fields.get(target_key or "<unknown>", 0) + 1
 
-        ref_audio = first_non_empty(item, ref_audio_fields)
-        if not isinstance(ref_audio, dict) or "array" not in ref_audio:
+        ref_audio, ref_key = pick_audio_field(item, ref_audio_fields, role="ref")
+        if ref_audio is None:
             rejected["ref_audio"] += 1
             continue
+        chosen_ref_fields[ref_key or "<unknown>"] = chosen_ref_fields.get(ref_key or "<unknown>", 0) + 1
 
         uid = f"{len(rows):06d}"
         tgt_path = os.path.join(tgt_dir, f"tgt_{uid}.wav")
@@ -192,6 +248,8 @@ def main() -> None:
         "text_fields": text_fields,
         "target_audio_fields": target_audio_fields,
         "ref_audio_fields": ref_audio_fields,
+        "chosen_target_fields": chosen_target_fields,
+        "chosen_ref_fields": chosen_ref_fields,
     }
     with open(os.path.join(out_dir, "stats.json"), "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
