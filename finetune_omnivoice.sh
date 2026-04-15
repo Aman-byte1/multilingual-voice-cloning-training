@@ -36,7 +36,7 @@ echo "============================================================"
 # Step 0: Clone OmniVoice repo if needed
 # ---------------------------------------------------------------
 if [ ! -d "${OMNIVOICE_DIR}" ]; then
-    echo "📦 Cloning OmniVoice repository..."
+    echo "🚀 Initializing native OmniVoice architecture..."
     git clone https://github.com/k2-fsa/OmniVoice.git "${OMNIVOICE_DIR}"
     cd "${OMNIVOICE_DIR}"
     pip install -e .
@@ -46,13 +46,9 @@ else
 fi
 
 # Fix: flex_attention crashes on GPUs with <128KB shared memory (T4, etc.).
-# The OmniVoice builder hardcodes flex_attention which requires torch.compile +
-# Triton autotuning.  Switch to SDPA which works on all GPUs.
-if grep -q 'flex_attention' "${OMNIVOICE_DIR}/omnivoice/training/builder.py" 2>/dev/null; then
-    sed -i 's/attn_implementation="flex_attention"/attn_implementation="eager"/g' \
-        "${OMNIVOICE_DIR}/omnivoice/training/builder.py"
-    echo "   🔧 Patched OmniVoice builder: flex_attention → eager"
-fi
+# Run the OmniVoice patch after the repo exists so both the builder and the
+# model-side BlockMask path are updated together.
+python patch_omnivoice_attention.py --omnivoice-dir "${OMNIVOICE_DIR}"
 
 export PYTHONPATH="${OMNIVOICE_DIR}:${PYTHONPATH:-}"
 

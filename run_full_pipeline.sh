@@ -165,13 +165,9 @@ if [ ! -d "./OmniVoice" ]; then
 fi
 
 # Fix: flex_attention crashes on GPUs with <128KB shared memory (T4, A40, etc.).
-# The OmniVoice builder hardcodes flex_attention which requires torch.compile +
-# Triton autotuning, AND the forward() method uses BlockMask which is only
-# compatible with flex_attention.  This patch switches to eager attention with
-# a standard 4D causal mask.
-if grep -q 'flex_attention' ./OmniVoice/omnivoice/training/builder.py 2>/dev/null; then
-    python patch_omnivoice_attention.py --omnivoice-dir ./OmniVoice
-fi
+# Run the full OmniVoice patch unconditionally so the builder and BlockMask
+# paths stay in sync even if the repo was partially patched already.
+python patch_omnivoice_attention.py --omnivoice-dir ./OmniVoice
 
 export PYTHONPATH="./OmniVoice:${PYTHONPATH:-}"
 
