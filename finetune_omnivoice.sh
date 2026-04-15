@@ -178,9 +178,9 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "mixed_precision": "no",
     "allow_tf32": false,
 
-    "logging_steps": 25,
-    "eval_steps": 100,
-    "save_steps": 100,
+    "logging_steps": 5,
+    "eval_steps": 10,
+    "save_steps": 25,
     "keep_last_n_checkpoints": 3
 }
 TRAIN_EOF
