@@ -114,6 +114,12 @@ for split_name in train dev; do
         SPLIT_JSONL="${DEV_JSONL}"
     fi
 
+    # Skip tokenization if the data.lst already exists and has content
+    if [ -f "${TOKEN_DIR}/${split_name}/data.lst" ] && [ -s "${TOKEN_DIR}/${split_name}/data.lst" ]; then
+        echo "  Tokens already exist for ${split_name} (found ${TOKEN_DIR}/${split_name}/data.lst). Skipping extraction."
+        continue
+    fi
+
     echo "  Tokenizing ${split_name} from ${SPLIT_JSONL}..."
     CUDA_VISIBLE_DEVICES=${GPU_IDS} \
         python extract_audio_tokens_compat.py \
