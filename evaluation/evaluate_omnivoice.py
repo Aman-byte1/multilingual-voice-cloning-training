@@ -233,7 +233,6 @@ def main():
             else:
                 wav_tensor = audio_out
 
-            import numpy as np
             if isinstance(wav_tensor, np.ndarray):
                 wav_tensor = torch.from_numpy(wav_tensor)
                 
