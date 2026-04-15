@@ -468,12 +468,16 @@ def main():
             # Save the state dict
             torch.save(merged_state, os.path.join(merged_path, "pytorch_model.bin"))
             
-            # Copy configs over from adapter if any
+            # Copy configs over from latest checkpoint to make it loadable
             import shutil
-            for cfg in ["config.json", "generation_config.json"]:
-                src = os.path.join(final_path, cfg)
-                if os.path.exists(src):
-                    shutil.copy(src, os.path.join(merged_path, cfg))
+            import glob
+            checkpoints = glob.glob(os.path.join(args.output_dir, "checkpoint-*"))
+            if checkpoints:
+                latest_ckpt = max(checkpoints, key=os.path.getmtime)
+                for f in os.listdir(latest_ckpt):
+                    if f.endswith(".json") or f.endswith(".jinja"):
+                        shutil.copy(os.path.join(latest_ckpt, f), os.path.join(merged_path, f))
+            logger.info("✅ Merged model saved successfully!")
         
         logger.info("\n✅ Training completed successfully!")
         
