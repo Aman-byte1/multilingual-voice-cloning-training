@@ -181,11 +181,9 @@ def get_lora_config(args) -> LoraConfig:
         "q_proj", "k_proj", "v_proj", "o_proj",
         # Feed-forward network (important for prosody)
         "gate_proj", "up_proj", "down_proj",
+        # Audio projections (critical for speaker identity)
+        "audio_proj", "text_to_audio_proj",
     ]
-    
-    # Add audio-specific modules if they exist
-    if args.target_audio_modules:
-        target_modules.extend(["audio_proj", "text_to_audio_proj"])
     
     config = LoraConfig(
         r=args.lora_rank,
@@ -448,12 +446,34 @@ def main():
         model.llm.save_pretrained(final_path)
         logger.info(f"\n💾 Saved final LoRA adapters to: {final_path}")
         
-        # Save merged model (optional)
+        # Save merged model for OmniVoice evaluator
         if hasattr(model.llm, "merge_and_unload"):
             merged_path = os.path.join(args.output_dir, "merged_model")
-            logger.info(f"💾 Saving merged model to: {merged_path}")
-            merged_model = model.llm.merge_and_unload()
-            merged_model.save_pretrained(merged_path)
+            os.makedirs(merged_path, exist_ok=True)
+            logger.info(f"💾 Saving merged OmniVoice model to: {merged_path}")
+            
+            merged_state = {}
+            merged_llm = model.llm.merge_and_unload()
+            
+            # Remap and flatten keys for OmniVoice compat.
+            for k, v in merged_llm.state_dict().items():
+                new_k = k.replace("base_model.model.", "")
+                merged_state[f"llm.{new_k}"] = v
+                
+            # Add non-LLM components
+            for k, v in model.state_dict().items():
+                if not k.startswith("llm."):
+                    merged_state[k] = v
+                    
+            # Save the state dict
+            torch.save(merged_state, os.path.join(merged_path, "pytorch_model.bin"))
+            
+            # Copy configs over from adapter if any
+            import shutil
+            for cfg in ["config.json", "generation_config.json"]:
+                src = os.path.join(final_path, cfg)
+                if os.path.exists(src):
+                    shutil.copy(src, os.path.join(merged_path, cfg))
         
         logger.info("\n✅ Training completed successfully!")
         
