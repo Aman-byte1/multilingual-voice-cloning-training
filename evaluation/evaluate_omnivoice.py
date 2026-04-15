@@ -174,39 +174,75 @@ def main():
     print(f"\n🔧  Phase 2: Loading OmniVoice model")
     from omnivoice import OmniVoice
 
-    # Check if this is a local directory (likely a LoRA adapter or merged model without full config)
-    if os.path.isdir(args.model_name):
-        print(f"   Detected local directory. Loading base model first...")
+    model_arg = args.model_name
+    resolved_model_path = os.path.abspath(os.path.expanduser(model_arg))
+    looks_like_local_path = (
+        model_arg.startswith(".")
+        or model_arg.startswith("/")
+        or model_arg.startswith("~")
+        or (os.path.sep in model_arg)
+        or (os.path.altsep and os.path.altsep in model_arg)
+    )
+
+    # Local paths (adapters/checkpoints/merged folders): always load base first, then overlay local weights.
+    if looks_like_local_path:
+        if not os.path.isdir(resolved_model_path):
+            raise FileNotFoundError(
+                f"Local model path not found: {model_arg} (resolved: {resolved_model_path}, cwd: {os.getcwd()})"
+            )
+
+        print(f"   Detected local directory: {resolved_model_path}")
+        print("   Loading base OmniVoice first...")
         model = OmniVoice.from_pretrained(
             "k2-fsa/OmniVoice",
             device_map=f"{device}:0",
             dtype=torch.float16,
             trust_remote_code=True,
         )
-        
-        # Try loading as a PEFT LoRA adapter first (e.g. final_lora or checkpoint-XXX)
-        if os.path.exists(os.path.join(args.model_name, "adapter_config.json")):
-            print(f"   Detected LoRA config. Loading adapters from {args.model_name}...")
+
+        # 1) PEFT adapter folder (final_lora, adapter export)
+        adapter_cfg = os.path.join(resolved_model_path, "adapter_config.json")
+        if os.path.exists(adapter_cfg):
+            print(f"   Detected LoRA config. Loading adapters from {resolved_model_path}...")
             from peft import PeftModel
-            model.llm = PeftModel.from_pretrained(model.llm, args.model_name)
+            model.llm = PeftModel.from_pretrained(model.llm, resolved_model_path)
             model.llm = model.llm.merge_and_unload()
-            
-        # Try loading as a custom state dict (pytorch_model.bin)
-        elif os.path.exists(os.path.join(args.model_name, "pytorch_model.bin")):
-            state_dict_path = os.path.join(args.model_name, "pytorch_model.bin")
+
+        # 2) Merged or remapped full checkpoint
+        elif os.path.exists(os.path.join(resolved_model_path, "pytorch_model.bin")):
+            state_dict_path = os.path.join(resolved_model_path, "pytorch_model.bin")
             print(f"   Loading custom weights from {state_dict_path}...")
             state_dict = torch.load(state_dict_path, map_location=device)
             model.load_state_dict(state_dict, strict=False)
-            
-        # Fallback to loading safetensors directly
-        elif os.path.exists(os.path.join(args.model_name, "model.safetensors")):
-            print(f"   Loading raw model.safetensors from {args.model_name}...")
+
+        # 3) Raw accelerate safetensors with LoRA/base_model prefixes
+        elif os.path.exists(os.path.join(resolved_model_path, "model.safetensors")):
+            print(f"   Loading raw model.safetensors from {resolved_model_path}...")
             from safetensors.torch import load_file
-            state_dict = load_file(os.path.join(args.model_name, "model.safetensors"), device=device)
-            model.load_state_dict(state_dict, strict=False)
-            
+
+            raw_state = load_file(os.path.join(resolved_model_path, "model.safetensors"), device=device)
+            remapped_state = {}
+            skipped_lora = 0
+
+            for k, v in raw_state.items():
+                # Skip adapter-only tensors; we only want merged/base tensors for full-model load.
+                if ".lora_A." in k or ".lora_B." in k:
+                    skipped_lora += 1
+                    continue
+
+                new_k = k
+                if new_k.startswith("llm.base_model.model."):
+                    new_k = "llm." + new_k[len("llm.base_model.model."):]
+                if ".base_layer.weight" in new_k:
+                    new_k = new_k.replace(".base_layer.weight", ".weight")
+
+                remapped_state[new_k] = v
+
+            print(f"   Remapped {len(remapped_state)} tensors, skipped {skipped_lora} LoRA tensors.")
+            model.load_state_dict(remapped_state, strict=False)
+
         else:
-            print(f"   Warning: Could not find valid weights in {args.model_name}. Using base model.")
+            print(f"   Warning: Could not find recognized weight files in {resolved_model_path}. Using base model.")
     else:
         model = OmniVoice.from_pretrained(
             args.model_name,
