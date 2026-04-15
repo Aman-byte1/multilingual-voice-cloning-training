@@ -174,11 +174,27 @@ def main():
     print(f"\n🔧  Phase 2: Loading OmniVoice model")
     from omnivoice import OmniVoice
 
-    model = OmniVoice.from_pretrained(
-        args.model_name,
-        device_map=f"{device}:0",
-        dtype=torch.float16
-    )
+    # Check if this is a merged model directory that needs special loading
+    if os.path.isdir(args.model_name) and os.path.exists(os.path.join(args.model_name, "pytorch_model.bin")):
+        print(f"   Detected local merged model. Loading base model first...")
+        model = OmniVoice.from_pretrained(
+            "k2-fsa/OmniVoice",
+            device_map=f"{device}:0",
+            dtype=torch.float16,
+            trust_remote_code=True,
+        )
+        
+        state_dict_path = os.path.join(args.model_name, "pytorch_model.bin")
+        print(f"   Loading custom weights from {state_dict_path}...")
+        state_dict = torch.load(state_dict_path, map_location=device)
+        model.load_state_dict(state_dict, strict=False)
+    else:
+        model = OmniVoice.from_pretrained(
+            args.model_name,
+            device_map=f"{device}:0",
+            dtype=torch.float16,
+            trust_remote_code=True,
+        )
     print("   OmniVoice loaded ✓")
 
     OMNI_SR = 24000  # OmniVoice outputs at 24kHz
