@@ -137,6 +137,17 @@ def patch_omnivoice_block_mask() -> bool:
     return True
 
 
+
+                    _FLOAT8_ALIASES = [
+                        "float8_e4m3fn",
+                        "float8_e4m3fnuz",
+                        "float8_e5m2",
+                        "float8_e5m2fnuz",
+                        "float8_e8m0fnu",   # the one that actually crashed
+                    ]
+                    for _f8_name in _FLOAT8_ALIASES:
+                        if not hasattr(torch, _f8_name):
+                            setattr(torch, _f8_name, torch.float32)
 def verify_configs(train_config_path: str, data_config_path: str):
     """Verify that config files exist and are valid JSON."""
     import json
@@ -183,8 +194,7 @@ def get_lora_config(args) -> LoraConfig:
         bias="none",
         task_type=TaskType.CAUSAL_LM,
         use_rslora=args.use_rslora,
-        init_lora_weights="gaussian",
-        autocast_adapter_dtype=False,
+        init_lora_weights="gaussian"
     )
     
     logger.info(f"LoRA Config: rank={config.r}, alpha={config.lora_alpha}, dropout={config.lora_dropout}")
