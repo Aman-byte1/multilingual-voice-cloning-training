@@ -18,7 +18,7 @@ from typing import Iterable, Optional
 import numpy as np
 import torch
 import torchaudio
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 from tqdm import tqdm
 
 
@@ -34,10 +34,14 @@ def _looks_like_audio(v) -> bool:
     if isinstance(v, dict):
         if "array" in v and "sampling_rate" in v:
             return True
+        # Path-only dicts from HF can be unresolved ids (e.g. "fr_00001").
+        # Treat as audio only if the path is actually resolvable on disk.
         if "path" in v and v["path"]:
-            return True
+            p = str(v["path"])
+            if os.path.isabs(p) and os.path.exists(p):
+                return True
     if isinstance(v, str) and v:
-        return True
+        return os.path.isabs(v) and os.path.exists(v)
     return False
 
 
@@ -67,6 +71,19 @@ def pick_audio_field(row: dict, candidates: list[str], role: str):
     return None, None
 
 
+def maybe_cast_audio_columns(ds, columns: list[str]):
+    casted = []
+    for col in columns:
+        if col not in ds.column_names:
+            continue
+        try:
+            ds = ds.cast_column(col, Audio())
+            casted.append(col)
+        except Exception:
+            pass
+    return ds, casted
+
+
 def save_wav(audio_field, out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -87,6 +104,9 @@ def save_wav(audio_field, out_path: str) -> None:
 
     if src_path is None:
         raise ValueError(f"Unsupported audio field format: {type(audio_field)}")
+
+    if not os.path.exists(src_path):
+        raise FileNotFoundError(f"Audio path does not exist: {src_path}")
 
     wav, sr = torchaudio.load(src_path)
     torchaudio.save(out_path, wav, sample_rate=sr)
@@ -138,6 +158,11 @@ def main() -> None:
 
     print(f"Loading dataset: {args.dataset} [{args.split}]")
     ds = load_dataset(args.dataset, split=args.split)
+
+    # Decode likely audio columns up front to materialize {array, sampling_rate}
+    # and avoid unresolved path ids (e.g. "fr_00001").
+    candidate_audio_cols = list(dict.fromkeys(target_audio_fields + ref_audio_fields))
+    ds, casted_cols = maybe_cast_audio_columns(ds, candidate_audio_cols)
 
     out_dir = os.path.abspath(args.output_dir)
     tgt_dir = os.path.join(out_dir, "target_wavs")
@@ -250,6 +275,7 @@ def main() -> None:
         "ref_audio_fields": ref_audio_fields,
         "chosen_target_fields": chosen_target_fields,
         "chosen_ref_fields": chosen_ref_fields,
+        "casted_audio_columns": casted_cols,
     }
     with open(os.path.join(out_dir, "stats.json"), "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
