@@ -93,6 +93,11 @@ def main():
     # Custom LoRA arguments
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank for LoRA adapters")
     parser.add_argument("--lora_alpha", type=int, default=64, help="Alpha for LoRA adapters")
+    parser.add_argument(
+        "--low-vram",
+        action="store_true",
+        help="Use conservative memory settings (smaller packed batch + higher grad accumulation)",
+    )
     
     args = parser.parse_args()
 
@@ -106,6 +111,20 @@ def main():
     config = TrainingConfig.from_json(args.train_config)
     config.output_dir = args.output_dir
     config.data_config = args.data_config
+
+    if args.low_vram:
+        # Eager attention has quadratic memory growth in sequence length.
+        # Reduce packed length and compensate with more accumulation.
+        config.batch_tokens = min(config.batch_tokens, 1024)
+        config.gradient_accumulation_steps = max(config.gradient_accumulation_steps, 32)
+        config.num_workers = 0
+        print(
+            "🧯 Low-VRAM mode: "
+            f"batch_tokens={config.batch_tokens}, "
+            f"grad_accum={config.gradient_accumulation_steps}, "
+            f"num_workers={config.num_workers}",
+            flush=True,
+        )
 
     # 2. Build Components
     print("🚀 Initializing native OmniVoice architecture...", flush=True)
@@ -129,6 +148,12 @@ def main():
     # Wrap the language model component (Qwen3) of OmniVoice
     # Note: OmniVoice is defined as OmniVoice(config, llm=AutoModel.from_pretrained(...))
     model.llm = get_peft_model(model.llm, lora_config)
+
+    # Reduce activation memory during training.
+    if hasattr(model.llm, "gradient_checkpointing_enable"):
+        model.llm.gradient_checkpointing_enable()
+    if hasattr(model.llm, "config"):
+        model.llm.config.use_cache = False
     
     # Optional debug print for trainable parameter count
     model.llm.print_trainable_parameters()
