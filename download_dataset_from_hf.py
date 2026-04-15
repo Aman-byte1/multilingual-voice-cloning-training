@@ -79,10 +79,17 @@ def main():
     print(f"Loading dataset: {args.repo_id} [{args.split}]")
     ds = load_dataset(args.repo_id, split=args.split)
 
+    # Keep only needed columns so unrelated Audio columns never get decoded.
+    needed_cols = ["id", "language", "text", "best_score", "best_audio"]
+    present_cols = [c for c in needed_cols if c in ds.column_names]
+    ds = ds.select_columns(present_cols)
+
     # Avoid runtime dependency on torchcodec when reading audio fields.
-    # We only need raw bytes/path and will decode with soundfile when needed.
-    if "best_audio" in ds.column_names:
-        ds = ds.cast_column("best_audio", Audio(decode=False))
+    # Some environments attempt to decode Audio columns while iterating rows.
+    for col in ds.column_names:
+        feature = ds.features.get(col)
+        if isinstance(feature, Audio):
+            ds = ds.cast_column(col, Audio(decode=False))
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(args.jsonl_path) or ".", exist_ok=True)
