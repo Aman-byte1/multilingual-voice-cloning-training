@@ -206,11 +206,11 @@ def main():
                     f"   Local model path not found, falling back to sibling checkpoint: {resolved_model_path}"
                 )
             else:
-                raise FileNotFoundError(
-                    f"Local model path not found: {model_arg} (resolved: {resolved_model_path}, cwd: {os.getcwd()})"
+                print(
+                    f"   Warning: local model path not found: {model_arg} (resolved: {resolved_model_path}, cwd: {os.getcwd()}). Using base OmniVoice."
                 )
+                resolved_model_path = None
 
-        print(f"   Detected local directory: {resolved_model_path}")
         print("   Loading base OmniVoice first...")
         model = OmniVoice.from_pretrained(
             "k2-fsa/OmniVoice",
@@ -220,22 +220,22 @@ def main():
         )
 
         # 1) PEFT adapter folder (final_lora, adapter export)
-        adapter_cfg = os.path.join(resolved_model_path, "adapter_config.json")
-        if os.path.exists(adapter_cfg):
+        adapter_cfg = os.path.join(resolved_model_path, "adapter_config.json") if resolved_model_path else None
+        if adapter_cfg and os.path.exists(adapter_cfg):
             print(f"   Detected LoRA config. Loading adapters from {resolved_model_path}...")
             from peft import PeftModel
             model.llm = PeftModel.from_pretrained(model.llm, resolved_model_path)
             model.llm = model.llm.merge_and_unload()
 
         # 2) Merged or remapped full checkpoint
-        elif os.path.exists(os.path.join(resolved_model_path, "pytorch_model.bin")):
+        elif resolved_model_path and os.path.exists(os.path.join(resolved_model_path, "pytorch_model.bin")):
             state_dict_path = os.path.join(resolved_model_path, "pytorch_model.bin")
             print(f"   Loading custom weights from {state_dict_path}...")
             state_dict = torch.load(state_dict_path, map_location=device)
             model.load_state_dict(state_dict, strict=False)
 
         # 3) Raw accelerate safetensors with LoRA/base_model prefixes
-        elif os.path.exists(os.path.join(resolved_model_path, "model.safetensors")):
+        elif resolved_model_path and os.path.exists(os.path.join(resolved_model_path, "model.safetensors")):
             print(f"   Loading raw model.safetensors from {resolved_model_path}...")
             from safetensors.torch import load_file
 
