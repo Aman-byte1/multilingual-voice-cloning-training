@@ -174,11 +174,19 @@ def main():
     print(f"\n🔧  Phase 2: Loading OmniVoice model")
     from omnivoice import OmniVoice
 
+    # Load the base model first
     model = OmniVoice.from_pretrained(
-        args.model_name,
+        "k2-fsa/OmniVoice",
         device_map=f"{device}:0",
         dtype=torch.float16
     )
+    
+    if args.model_name != "k2-fsa/OmniVoice":
+        print(f"   Injecting PEFT adapters from {args.model_name}")
+        from peft import PeftModel
+        # Wrap Qwen3 inside OmniVoice with our trained LoRA
+        model.llm = PeftModel.from_pretrained(model.llm, args.model_name)
+    
     print("   OmniVoice loaded ✓")
 
     OMNI_SR = 24000  # OmniVoice outputs at 24kHz
@@ -220,8 +228,15 @@ def main():
             audio_out = model.generate(**gen_kwargs)
             t1 = time.perf_counter()
 
-            # audio_out is a list of tensors with shape (1, T) at 24kHz
-            wav_tensor = audio_out[0]
+            if isinstance(audio_out, list):
+                wav_tensor = audio_out[0]
+            else:
+                wav_tensor = audio_out
+
+            import numpy as np
+            if isinstance(wav_tensor, np.ndarray):
+                wav_tensor = torch.from_numpy(wav_tensor)
+                
             if wav_tensor.dim() == 1:
                 wav_tensor = wav_tensor.unsqueeze(0)
             torchaudio.save(syn_path, wav_tensor.cpu(), OMNI_SR)
