@@ -193,7 +193,7 @@ def get_lora_config(args) -> LoraConfig:
         target_modules=target_modules,
         lora_dropout=args.lora_dropout,
         bias="none",
-        task_type=TaskType.CAUSAL_LM,
+        task_type=TaskType.FEATURE_EXTRACTION,
         use_rslora=args.use_rslora,
         init_lora_weights="gaussian"
     )
