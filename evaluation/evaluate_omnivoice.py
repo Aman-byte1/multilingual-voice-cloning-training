@@ -174,19 +174,11 @@ def main():
     print(f"\n🔧  Phase 2: Loading OmniVoice model")
     from omnivoice import OmniVoice
 
-    # Load the base model first
     model = OmniVoice.from_pretrained(
-        "k2-fsa/OmniVoice",
+        args.model_name,
         device_map=f"{device}:0",
         dtype=torch.float16
     )
-    
-    if args.model_name != "k2-fsa/OmniVoice":
-        print(f"   Injecting PEFT adapters from {args.model_name}")
-        from peft import PeftModel
-        # Wrap Qwen3 inside OmniVoice with our trained LoRA
-        model.llm = PeftModel.from_pretrained(model.llm, args.model_name)
-    
     print("   OmniVoice loaded ✓")
 
     OMNI_SR = 24000  # OmniVoice outputs at 24kHz
