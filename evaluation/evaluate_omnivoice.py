@@ -15,6 +15,7 @@ import csv
 import json
 import time
 import argparse
+import glob
 import warnings
 import gc
 import numpy as np
@@ -187,9 +188,27 @@ def main():
     # Local paths (adapters/checkpoints/merged folders): always load base first, then overlay local weights.
     if looks_like_local_path:
         if not os.path.isdir(resolved_model_path):
-            raise FileNotFoundError(
-                f"Local model path not found: {model_arg} (resolved: {resolved_model_path}, cwd: {os.getcwd()})"
-            )
+            parent_dir = os.path.dirname(resolved_model_path)
+            sibling_candidates = []
+            if os.path.isdir(parent_dir):
+                sibling_candidates = [
+                    p for p in glob.glob(os.path.join(parent_dir, "checkpoint-*"))
+                    if os.path.isdir(p)
+                ]
+                for alias_name in ("final_lora", "merged_model"):
+                    alias_path = os.path.join(parent_dir, alias_name)
+                    if os.path.isdir(alias_path):
+                        sibling_candidates.append(alias_path)
+
+            if sibling_candidates:
+                resolved_model_path = max(sibling_candidates, key=os.path.getmtime)
+                print(
+                    f"   Local model path not found, falling back to sibling checkpoint: {resolved_model_path}"
+                )
+            else:
+                raise FileNotFoundError(
+                    f"Local model path not found: {model_arg} (resolved: {resolved_model_path}, cwd: {os.getcwd()})"
+                )
 
         print(f"   Detected local directory: {resolved_model_path}")
         print("   Loading base OmniVoice first...")
