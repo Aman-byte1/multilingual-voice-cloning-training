@@ -142,7 +142,8 @@ def main():
         lora_alpha=args.lora_alpha,
         target_modules=target_modules,
         lora_dropout=0.05,
-        bias="none"
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
     )
 
     # Wrap the language model component (Qwen3) of OmniVoice

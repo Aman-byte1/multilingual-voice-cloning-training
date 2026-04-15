@@ -1,16 +1,17 @@
 #!/bin/bash
 # ============================================================
-# OmniVoice Fine-tuning — Best-of-N Ensemble Training
+# OmniVoice Fine-tuning — Chinese Voice Cloning Training
 # ============================================================
 # This script:
-# 1. Merges per-language JSONL manifests into train/dev splits
-# 2. Clones OmniVoice repo (for training scripts)
-# 3. Tokenizes audio into WebDataset shards
-# 4. Runs full fine-tuning with accelerate
+# 1. Exports zh-only filtered samples if needed
+# 2. Splits the manifest into train/dev
+# 3. Clones OmniVoice repo (for training scripts)
+# 4. Tokenizes audio into WebDataset shards
+# 5. Runs full fine-tuning with accelerate
 #
 # Prerequisites:
-#   - Run synthesize_dev_best_of_n.py for all 3 languages first
-#   - Outputs: dev_synth/train_fr.jsonl, train_ar.jsonl, train_zh.jsonl
+#   - Run download_dataset_from_hf.py to export zh-only data first
+#   - Expected manifest: ./data/finetune/merged_all.jsonl
 #
 # Usage:
 #   bash finetune_omnivoice.sh
@@ -25,6 +26,9 @@ DEV_SYNTH_DIR="./dev_synth"
 OMNIVOICE_DIR="./OmniVoice"
 OUTPUT_DIR="./exp/omnivoice_finetuned"
 DATA_DIR="./data/finetune"
+HF_REPO_ID="${HF_REPO_ID:-amanuelbyte/omnivoice-best-of-n-training}"
+TARGET_LANGUAGE="zh"
+MIN_SCORE="${MIN_SCORE:-0.65}"
 TRAIN_SPLIT_RATIO=0.85   # 85% train, 15% dev
 # ===========================
 
@@ -53,31 +57,31 @@ python patch_omnivoice_attention.py --omnivoice-dir "${OMNIVOICE_DIR}"
 export PYTHONPATH="${OMNIVOICE_DIR}:${PYTHONPATH:-}"
 
 # ---------------------------------------------------------------
-# Step 1: Merge per-language JSONLs and split into train/dev
+# Step 1: Export zh-only data if the manifest is missing
 # ---------------------------------------------------------------
 echo ""
-echo "📋 Step 1: Merging JSONL manifests..."
+echo "📋 Step 1: Preparing zh-only manifest..."
 
 mkdir -p "${DATA_DIR}"
 MERGED_JSONL="${DATA_DIR}/merged_all.jsonl"
 TRAIN_JSONL="${DATA_DIR}/train.jsonl"
 DEV_JSONL="${DATA_DIR}/dev.jsonl"
 
-# Merge all language JSONLs
-# (Bypassed) Directly reusing the downloaded merged_all.jsonl from HuggingFace
-# cat /dev/null > "${MERGED_JSONL}"
-# for lang in fr ar zh; do
-#     SRC="${DEV_SYNTH_DIR}/train_${lang}.jsonl"
-#     if [ -f "${SRC}" ]; then
-#         echo "  Adding ${SRC} ($(wc -l < ${SRC}) samples)"
-#         cat "${SRC}" >> "${MERGED_JSONL}"
-#     else
-#         echo "  ⚠ Missing ${SRC}"
-#     fi
-# done
+if [ ! -f "${MERGED_JSONL}" ]; then
+    echo "  Exporting zh-only filtered data from HF..."
+    python download_dataset_from_hf.py \
+        --repo-id "${HF_REPO_ID}" \
+        --split train \
+        --min-score "${MIN_SCORE}" \
+        --languages "${TARGET_LANGUAGE}" \
+        --output-dir "${DATA_DIR}/wavs" \
+        --jsonl-path "${MERGED_JSONL}"
+else
+    echo "  Using existing manifest: ${MERGED_JSONL}"
+fi
 
 TOTAL=$(wc -l < "${MERGED_JSONL}")
-echo "  Total merged samples: ${TOTAL}"
+echo "  Total zh samples: ${TOTAL}"
 
 # Shuffle and split
 python3 -c "
@@ -144,7 +148,7 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "drop_cond_ratio": 0.1,
     "prompt_ratio_range": [0.3, 0.7],
     "mask_ratio_range": [0.0, 1.0],
-    "language_ratio": 0.8,
+    "language_ratio": 1.0,
     "use_pinyin_ratio": 0.0,
     "instruct_ratio": 0.0,
     "only_instruct_ratio": 0.0,
@@ -155,15 +159,15 @@ cat > "${CONFIG_DIR}/train_config.json" << 'TRAIN_EOF'
     "learning_rate": 1e-4,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
-    "steps": 150,
+    "steps": 300,
     "seed": 42,
     "warmup_type": "ratio",
     "warmup_ratio": 0.05,
     "warmup_steps": 0,
 
-    "batch_tokens": 4096,
+    "batch_tokens": 3072,
     "gradient_accumulation_steps": 16,
-    "num_workers": 4,
+    "num_workers": 2,
 
     "mixed_precision": "bf16",
     "allow_tf32": true,
