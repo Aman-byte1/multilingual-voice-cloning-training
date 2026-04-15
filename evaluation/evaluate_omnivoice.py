@@ -174,9 +174,9 @@ def main():
     print(f"\n🔧  Phase 2: Loading OmniVoice model")
     from omnivoice import OmniVoice
 
-    # Check if this is a merged model directory that needs special loading
-    if os.path.isdir(args.model_name) and os.path.exists(os.path.join(args.model_name, "pytorch_model.bin")):
-        print(f"   Detected local merged model. Loading base model first...")
+    # Check if this is a local directory (likely a LoRA adapter or merged model without full config)
+    if os.path.isdir(args.model_name):
+        print(f"   Detected local directory. Loading base model first...")
         model = OmniVoice.from_pretrained(
             "k2-fsa/OmniVoice",
             device_map=f"{device}:0",
@@ -184,10 +184,29 @@ def main():
             trust_remote_code=True,
         )
         
-        state_dict_path = os.path.join(args.model_name, "pytorch_model.bin")
-        print(f"   Loading custom weights from {state_dict_path}...")
-        state_dict = torch.load(state_dict_path, map_location=device)
-        model.load_state_dict(state_dict, strict=False)
+        # Try loading as a PEFT LoRA adapter first (e.g. final_lora or checkpoint-XXX)
+        if os.path.exists(os.path.join(args.model_name, "adapter_config.json")):
+            print(f"   Detected LoRA config. Loading adapters from {args.model_name}...")
+            from peft import PeftModel
+            model.llm = PeftModel.from_pretrained(model.llm, args.model_name)
+            model.llm = model.llm.merge_and_unload()
+            
+        # Try loading as a custom state dict (pytorch_model.bin)
+        elif os.path.exists(os.path.join(args.model_name, "pytorch_model.bin")):
+            state_dict_path = os.path.join(args.model_name, "pytorch_model.bin")
+            print(f"   Loading custom weights from {state_dict_path}...")
+            state_dict = torch.load(state_dict_path, map_location=device)
+            model.load_state_dict(state_dict, strict=False)
+            
+        # Fallback to loading safetensors directly
+        elif os.path.exists(os.path.join(args.model_name, "model.safetensors")):
+            print(f"   Loading raw model.safetensors from {args.model_name}...")
+            from safetensors.torch import load_file
+            state_dict = load_file(os.path.join(args.model_name, "model.safetensors"), device=device)
+            model.load_state_dict(state_dict, strict=False)
+            
+        else:
+            print(f"   Warning: Could not find valid weights in {args.model_name}. Using base model.")
     else:
         model = OmniVoice.from_pretrained(
             args.model_name,
