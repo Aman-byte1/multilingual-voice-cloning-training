@@ -8,6 +8,7 @@ Optimized for Chinese voice cloning with proper error handling.
 import os
 import sys
 import argparse
+import types
 from functools import partial
 import torch
 import logging
@@ -25,6 +26,58 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def ensure_flex_attention_stub() -> bool:
+    """Register a minimal flex_attention module for older torch builds.
+
+    OmniVoice imports `torch.nn.attention.flex_attention` during module
+    import. If the installed torch build does not ship that module, we inject
+    a compatibility stub so OmniVoice can load and the later patch can replace
+    it with a dense causal mask implementation.
+    """
+
+    module_name = "torch.nn.attention.flex_attention"
+    if module_name in sys.modules:
+        return True
+
+    try:
+        import torch.nn.attention as attention_module
+
+        stub = types.ModuleType(module_name)
+
+        def create_block_mask(
+            mask_mod,
+            B=None,
+            H=None,
+            Q_LEN=None,
+            KV_LEN=None,
+            _compile=False,
+            device=None,
+            **kwargs,
+        ):
+            seq_len = int(Q_LEN or KV_LEN or 1)
+            if isinstance(mask_mod, partial) and mask_mod.args:
+                document_ids = mask_mod.args[0]
+                if torch.is_tensor(document_ids):
+                    seq_len = int(document_ids.numel())
+
+            causal = torch.tril(
+                torch.ones(seq_len, seq_len, device=device, dtype=torch.bool)
+            )
+            mask = torch.zeros(
+                (1, 1, seq_len, seq_len), device=device, dtype=torch.float32
+            )
+            mask.masked_fill_(~causal.unsqueeze(0).unsqueeze(0), torch.finfo(mask.dtype).min)
+            return mask
+
+        stub.create_block_mask = create_block_mask
+        sys.modules[module_name] = stub
+        setattr(attention_module, "flex_attention", stub)
+        return True
+    except Exception as exc:
+        logger.warning(f"Could not install flex_attention stub: {exc}")
+        return False
 
 
 def patch_omnivoice_block_mask() -> bool:
@@ -268,6 +321,9 @@ def main():
     try:
         # Verify configs exist and are valid
         verify_configs(args.train_config, args.data_config)
+
+        # Make OmniVoice importable even on torch builds that lack flex_attention.
+        ensure_flex_attention_stub()
         
         # Apply mask patch
         if not patch_omnivoice_block_mask():
