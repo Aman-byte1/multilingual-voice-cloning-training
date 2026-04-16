@@ -1,28 +1,28 @@
 #!/bin/bash
 # ============================================================
-# Evaluate checkpoint-100 for all 3 languages
-# Runs sequentially on GPU 0 (or whichever GPU you free up)
-# Can run while training continues on other GPUs
+# Evaluate checkpoint-100 on CPU (100 samples per language)
+# Won't touch GPU training at all
 # ============================================================
 set -euo pipefail
 
 export TORCHDYNAMO_DISABLE=1
+export CUDA_VISIBLE_DEVICES=""  # Force CPU — no GPU usage
 OMNIVOICE_DIR="./OmniVoice"
 export PYTHONPATH="${OMNIVOICE_DIR}:${PYTHONPATH:-}"
 
-EVAL_GPU="${1:-0}"  # Pass GPU id as arg, default 0
+SAMPLES=100
+
 echo "============================================================"
-echo "  Evaluating checkpoint-100 on GPU ${EVAL_GPU}"
+echo "  Evaluating checkpoint-100 on CPU (${SAMPLES} samples)"
+echo "  Training continues undisturbed on GPU"
 echo "============================================================"
 
-# ──────────────────────────────────────────────────────────────
-# Evaluate each language checkpoint
-# ──────────────────────────────────────────────────────────────
 declare -A LANG_WHISPER
 LANG_WHISPER[zh]="zh"
 LANG_WHISPER[fr]="fr"
 LANG_WHISPER[ar]="ar"
 
+# ── Evaluate finetuned checkpoints ──
 for LANG in zh fr ar; do
     CKPT="./exp/omnivoice_finetuned_${LANG}/checkpoint-100"
     OUT_DIR="./eval_results/checkpoint-100/${LANG}"
@@ -34,53 +34,43 @@ for LANG in zh fr ar; do
 
     echo ""
     echo "============================================================"
-    echo "  🔍 Evaluating ${LANG} (checkpoint-100)"
-    echo "  Model: ${CKPT}"
-    echo "  Output: ${OUT_DIR}"
+    echo "  🔍 Evaluating ${LANG} (checkpoint-100) on CPU"
     echo "============================================================"
 
-    CUDA_VISIBLE_DEVICES=${EVAL_GPU} python evaluation/evaluate_omnivoice.py \
+    python evaluation/evaluate_omnivoice.py \
         --model-name "${CKPT}" \
         --whisper-lang "${LANG_WHISPER[${LANG}]}" \
         --output-dir "${OUT_DIR}" \
-        --max-samples 30 \
+        --max-samples ${SAMPLES} \
         --resume
 
-    echo "  ✅ ${LANG} eval done → ${OUT_DIR}/eval_summary.json"
+    echo "  ✅ ${LANG} eval done"
 done
 
-# ──────────────────────────────────────────────────────────────
-# Also evaluate the base model for comparison
-# ──────────────────────────────────────────────────────────────
-echo ""
-echo "============================================================"
-echo "  🔍 Evaluating BASE OmniVoice (no LoRA) for comparison"
-echo "============================================================"
-
+# ── Evaluate baseline for comparison ──
 for LANG in zh fr ar; do
     OUT_DIR="./eval_results/baseline/${LANG}"
 
-    echo "  --> ${LANG} baseline..."
-    CUDA_VISIBLE_DEVICES=${EVAL_GPU} python evaluation/evaluate_omnivoice.py \
+    echo ""
+    echo "  --> ${LANG} baseline (CPU)..."
+    python evaluation/evaluate_omnivoice.py \
         --model-name "k2-fsa/OmniVoice" \
         --whisper-lang "${LANG_WHISPER[${LANG}]}" \
         --output-dir "${OUT_DIR}" \
-        --max-samples 30 \
+        --max-samples ${SAMPLES} \
         --resume
 
     echo "  ✅ ${LANG} baseline done"
 done
 
-# ──────────────────────────────────────────────────────────────
-# Summary comparison
-# ──────────────────────────────────────────────────────────────
+# ── Comparison table ──
 echo ""
 echo "============================================================"
 echo "  📊  COMPARISON: Baseline vs Checkpoint-100"
 echo "============================================================"
 
 python3 - << 'PYEOF'
-import json, os, sys
+import json, os
 
 langs = ["zh", "fr", "ar"]
 labels = {"zh": "Chinese", "fr": "French", "ar": "Arabic"}
