@@ -50,9 +50,13 @@ def ensure_flex_attention_stub() -> None:
         class BlockMask:
             pass
 
+        def dummy_flex_attention(*args, **kwargs):
+            pass
+
         stub.create_block_mask = create_block_mask
         stub._DEFAULT_SPARSE_BLOCK_SIZE = 128
         stub.BlockMask = BlockMask
+        stub.flex_attention = dummy_flex_attention
         sys.modules[module_name] = stub
         setattr(attention_module, "flex_attention", stub)
     except Exception:
