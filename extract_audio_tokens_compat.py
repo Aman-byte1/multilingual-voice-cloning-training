@@ -48,6 +48,7 @@ def ensure_flex_attention_stub() -> None:
             return mask
 
         stub.create_block_mask = create_block_mask
+        stub._DEFAULT_SPARSE_BLOCK_SIZE = 128
         sys.modules[module_name] = stub
         setattr(attention_module, "flex_attention", stub)
     except Exception:
