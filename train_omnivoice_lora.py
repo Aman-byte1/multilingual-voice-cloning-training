@@ -181,9 +181,11 @@ def get_lora_config(args) -> LoraConfig:
         "q_proj", "k_proj", "v_proj", "o_proj",
         # Feed-forward network (important for prosody)
         "gate_proj", "up_proj", "down_proj",
-        # Audio projections (critical for speaker identity)
-        "audio_proj", "text_to_audio_proj",
     ]
+    
+    # Only target audio modules if explicitly requested
+    if getattr(args, "target_audio_modules", False):
+        target_modules.extend(["audio_proj", "text_to_audio_proj"])
     
     config = LoraConfig(
         r=args.lora_rank,
@@ -477,7 +479,31 @@ def main():
                 for f in os.listdir(latest_ckpt):
                     if f.endswith(".json") or f.endswith(".jinja"):
                         shutil.copy(os.path.join(latest_ckpt, f), os.path.join(merged_path, f))
+            else:
+                # Fallback if training finished before any checkpoint was saved
+                logger.warning("No checkpoint directory found to copy configs from. Using tokenizer save.")
+                if hasattr(model.llm, "config"):
+                    model.llm.config.save_pretrained(merged_path)
+                if hasattr(tokenizer, "save_pretrained"):
+                    tokenizer.save_pretrained(merged_path)
+            
             logger.info("✅ Merged model saved successfully!")
+            
+            # --- EVALUATION FIX --- 
+            # Make sure the config matches the expected OmniVoice architecture naming
+            config_path = os.path.join(merged_path, "config.json")
+            if os.path.exists(config_path):
+                import json
+                with open(config_path, "r") as f:
+                    cfg_data = json.load(f)
+                
+                # Correct peft/transformers mismatches
+                if cfg_data.get("architectures", [""])[0] != "OmniVoiceForCausalLM":
+                    cfg_data["architectures"] = ["OmniVoiceForCausalLM"]
+                    cfg_data["model_type"] = "omnivoice"
+                    with open(config_path, "w") as f:
+                        json.dump(cfg_data, f, indent=2)
+            # ----------------------
         
         logger.info("\n✅ Training completed successfully!")
         

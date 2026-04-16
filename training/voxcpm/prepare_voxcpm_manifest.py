@@ -125,6 +125,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--min-text-len", type=int, default=2)
+    parser.add_argument("--language-field", default="", help="Optional language column name")
+    parser.add_argument("--language-value", default="", help="Optional language value to keep (e.g. zh)")
     parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument("--score-fields", default="score,similarity")
     parser.add_argument(
@@ -174,6 +176,7 @@ def main() -> None:
     chosen_target_fields = {}
     chosen_ref_fields = {}
     rejected = {
+        "language": 0,
         "text": 0,
         "target_audio": 0,
         "ref_audio": 0,
@@ -183,6 +186,12 @@ def main() -> None:
 
     for idx in tqdm(range(len(ds)), desc="Preparing"):
         item = ds[idx]
+
+        if args.language_field and args.language_value:
+            lang = str(item.get(args.language_field, "")).strip().lower()
+            if lang != args.language_value.strip().lower():
+                rejected["language"] += 1
+                continue
 
         score: Optional[float] = None
         for sf in score_fields:
@@ -265,6 +274,8 @@ def main() -> None:
     stats = {
         "dataset": args.dataset,
         "split": args.split,
+        "language_field": args.language_field,
+        "language_value": args.language_value,
         "total_input": len(ds),
         "kept": len(rows),
         "train": len(train_rows),

@@ -16,9 +16,12 @@ python training/voxcpm/prepare_voxcpm_manifest.py \
   --dataset "${HF_DATASET}" \
   --split train \
   --output-dir "${DATA_DIR}" \
-  --text-fields "trg_zh_text,text_zh" \
-  --target-audio-fields "trg_zh_voice,audio_zh" \
-  --ref-audio-fields "ref_en_voice,audio_en,ref_audio" \
+  --language-field "language" \
+  --language-value "zh" \
+  --text-fields "text" \
+  --target-audio-fields "best_audio" \
+  --ref-audio-fields "ref_audio" \
+  --score-fields "best_score" \
   --min-score 0.75
 
 python training/voxcpm/launch_voxcpm_lora.py \
