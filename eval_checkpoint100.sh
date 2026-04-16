@@ -10,6 +10,18 @@ export CUDA_VISIBLE_DEVICES=""  # Force CPU — no GPU usage
 OMNIVOICE_DIR="./OmniVoice"
 export PYTHONPATH="${OMNIVOICE_DIR}:${PYTHONPATH:-}"
 
+# ──────────────────────────────────────────────────────────────
+# Step 0: Ensure correct environment (avoid torchcodec errors)
+# ──────────────────────────────────────────────────────────────
+echo "Checking dependencies..."
+# Downgrade datasets to < 3.0.0 to avoid torchcodec enforcement
+pip install -q "datasets<3.0.0" "multidict<7.0.0" soundfile librosa jiwer faster-whisper speechbrain
+
+if [ -z "${HF_TOKEN:-}" ]; then
+    echo "⚠ WARNING: HF_TOKEN is not set. Downloads may be slow or rate-limited."
+fi
+
+
 SAMPLES=100
 
 echo "============================================================"
