@@ -26,12 +26,20 @@ python3 -m zipfile -e text.zip blind_test/text
 # 2. Setup Environment
 echo "🔧 Setting up OmniVoice environment..."
 # Locate and patch omnivoice to use 'eager' instead of 'flex_attention' (for older torch versions)
-python3 -c "import omnivoice, os; p = os.path.join(os.path.dirname(omnivoice.__file__), 'model/omnivoice_llm.py'); \
-if os.path.exists(p): \
-    with open(p, 'r') as f: content = f.read(); \
-    with open(p, 'w') as f: f.write(content.replace('flex_attention', 'eager')); \
-    print(f'✅ Patched {p}')
-else: print('⚠ OmniVoice source for patch not found, skipping.')"
+python3 <<EOF
+import omnivoice, os
+try:
+    p = os.path.join(os.path.dirname(omnivoice.__file__), 'model/omnivoice_llm.py')
+    if os.path.exists(p):
+        with open(p, 'r') as f: content = f.read()
+        with open(p, 'w') as f: f.write(content.replace('flex_attention', 'eager'))
+        print(f'✅ Patched {p}')
+    else:
+        print('⚠ OmniVoice source for patch not found, skipping.')
+except Exception as e:
+    print(f'⚠ Patch failed: {e}')
+EOF
+
 
 # 3. Generate Submission
 echo "🎙️ Starting Inference (this will take 1-2 hours)..."
