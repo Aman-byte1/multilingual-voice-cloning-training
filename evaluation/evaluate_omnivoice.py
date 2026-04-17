@@ -175,17 +175,10 @@ def main():
     print(f"\n🔧  Phase 2: Loading OmniVoice model")
     from omnivoice import OmniVoice
 
-    model_arg = args.model_name
-    resolved_model_path = os.path.abspath(os.path.expanduser(model_arg))
-    looks_like_local_path = (
-        model_arg.startswith(".")
-        or model_arg.startswith("/")
-        or model_arg.startswith("~")
-        or (os.path.sep in model_arg)
-        or (os.path.altsep and os.path.altsep in model_arg)
-    )
-
-    # Local paths (adapters/checkpoints/merged folders): always load base first, then overlay local weights.
+    # Model Loading Logic
+    print(f"   Loading model: {model_arg}")
+    
+    # 1. Handle local paths or specific checkpoint folders
     if looks_like_local_path:
         if not os.path.isdir(resolved_model_path):
             parent_dir = os.path.dirname(resolved_model_path)
@@ -202,16 +195,12 @@ def main():
 
             if sibling_candidates:
                 resolved_model_path = max(sibling_candidates, key=os.path.getmtime)
-                print(
-                    f"   Local model path not found, falling back to sibling checkpoint: {resolved_model_path}"
-                )
+                print(f"   Falling back to latest local checkpoint: {resolved_model_path}")
             else:
-                print(
-                    f"   Warning: local model path not found: {model_arg} (resolved: {resolved_model_path}, cwd: {os.getcwd()}). Using base OmniVoice."
-                )
+                print(f"   Warning: Path not found. Using base OmniVoice.")
                 resolved_model_path = None
 
-        print("   Loading base OmniVoice first...")
+        print("   Loading base OmniVoice...")
         model = OmniVoice.from_pretrained(
             "k2-fsa/OmniVoice",
             device_map=f"{device}:0",
@@ -219,56 +208,46 @@ def main():
             trust_remote_code=True,
         )
 
-        # 1) PEFT adapter folder (final_lora, adapter export)
-        adapter_cfg = os.path.join(resolved_model_path, "adapter_config.json") if resolved_model_path else None
-        if adapter_cfg and os.path.exists(adapter_cfg):
-            print(f"   Detected LoRA config. Loading adapters from {resolved_model_path}...")
-            from peft import PeftModel
-            model.llm = PeftModel.from_pretrained(model.llm, resolved_model_path)
-            model.llm = model.llm.merge_and_unload()
+        if resolved_model_path:
+            # Check for adapter config
+            if os.path.exists(os.path.join(resolved_model_path, "adapter_config.json")):
+                from peft import PeftModel
+                print(f"   Merging local LoRA adapter: {resolved_model_path}")
+                model.llm = PeftModel.from_pretrained(model.llm, resolved_model_path)
+                model.llm = model.llm.merge_and_unload()
+            elif os.path.exists(os.path.join(resolved_model_path, "model.safetensors")):
+                from safetensors.torch import load_file
+                print(f"   Loading weights from safetensors...")
+                raw_state = load_file(os.path.join(resolved_model_path, "model.safetensors"), device=device)
+                model.load_state_dict({k.replace("llm.base_model.model.", "llm.").replace(".base_layer.weight", ".weight"): v for k, v in raw_state.items() if ".lora_" not in k}, strict=False)
 
-        # 2) Merged or remapped full checkpoint
-        elif resolved_model_path and os.path.exists(os.path.join(resolved_model_path, "pytorch_model.bin")):
-            state_dict_path = os.path.join(resolved_model_path, "pytorch_model.bin")
-            print(f"   Loading custom weights from {state_dict_path}...")
-            state_dict = torch.load(state_dict_path, map_location=device)
-            model.load_state_dict(state_dict, strict=False)
-
-        # 3) Raw accelerate safetensors with LoRA/base_model prefixes
-        elif resolved_model_path and os.path.exists(os.path.join(resolved_model_path, "model.safetensors")):
-            print(f"   Loading raw model.safetensors from {resolved_model_path}...")
-            from safetensors.torch import load_file
-
-            raw_state = load_file(os.path.join(resolved_model_path, "model.safetensors"), device=device)
-            remapped_state = {}
-            skipped_lora = 0
-
-            for k, v in raw_state.items():
-                # Skip adapter-only tensors; we only want merged/base tensors for full-model load.
-                if ".lora_A." in k or ".lora_B." in k:
-                    skipped_lora += 1
-                    continue
-
-                new_k = k
-                if new_k.startswith("llm.base_model.model."):
-                    new_k = "llm." + new_k[len("llm.base_model.model."):]
-                if ".base_layer.weight" in new_k:
-                    new_k = new_k.replace(".base_layer.weight", ".weight")
-
-                remapped_state[new_k] = v
-
-            print(f"   Remapped {len(remapped_state)} tensors, skipped {skipped_lora} LoRA tensors.")
-            model.load_state_dict(remapped_state, strict=False)
-
-        else:
-            print(f"   Warning: Could not find recognized weight files in {resolved_model_path}. Using base model.")
+    # 2. Handle remote models (Base OmniVoice OR Remote Adapters)
     else:
-        model = OmniVoice.from_pretrained(
-            args.model_name,
-            device_map=f"{device}:0",
-            dtype=torch.float16,
-            trust_remote_code=True,
-        )
+        # Check if it's a known adapter (user's repo)
+        is_adapter = "lora" in model_arg.lower() or "adapter" in model_arg.lower()
+        
+        if is_adapter:
+            print(f"   Detected remote adapter repo: {model_arg}")
+            print("   Loading base OmniVoice first...")
+            model = OmniVoice.from_pretrained(
+                "k2-fsa/OmniVoice",
+                device_map=f"{device}:0",
+                dtype=torch.float16,
+                trust_remote_code=True,
+            )
+            from peft import PeftModel
+            print(f"   Applying and merging remote adapter: {model_arg}")
+            model.llm = PeftModel.from_pretrained(model.llm, model_arg)
+            model.llm = model.llm.merge_and_unload()
+        else:
+            # Just load the model as requested (likely base model)
+            model = OmniVoice.from_pretrained(
+                model_arg,
+                device_map=f"{device}:0",
+                dtype=torch.float16,
+                trust_remote_code=True,
+            )
+
     print("   OmniVoice loaded ✓")
 
     OMNI_SR = 24000  # OmniVoice outputs at 24kHz
