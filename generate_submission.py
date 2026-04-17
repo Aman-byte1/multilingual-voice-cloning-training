@@ -182,6 +182,11 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
         try:
             # Extract 4 deep embeddings from the 5-minute audio instead of just the first 15s
             ref_chunks = get_multi_reference_chunks(ref_path)
+            
+            # Fuse the cleanest chunks into a single reference audio tensor to avoid batch mismatch errors
+            sr = ref_chunks[0][1]
+            clean_ref_tensor = torch.cat([c[0] for c in ref_chunks], dim=-1)
+            fused_ref = (clean_ref_tensor, sr)
         except: continue
         
         # Nested progress bar for lines
@@ -195,8 +200,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 audios = []
                 for ct in chunks:
                     with torch.no_grad():
-                        # Pass list of tuples for native multi-reference embedding averaging
-                        res = model.generate(text=ct, ref_audio=ref_chunks, temperature=0.8, top_p=0.9)
+                        # Pass the fused multi-reference audio natively
+                        res = model.generate(text=ct, ref_audio=fused_ref, temperature=0.8, top_p=0.9)
                         if isinstance(res, tuple): audio_data, sr = res
                         else: audio_data, sr = res, 16000
                         
