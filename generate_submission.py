@@ -174,6 +174,10 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
         try:
             # Resample and grab exactly 20s of clean speech to prevent model collapse
             clean_ref_tuple = get_best_reference(ref_path, target_sr=16000, duration=20.0)
+            
+            # Save the cleanly extracted 20s reference so the user can listen and verify
+            ref_snippet_path = out_dir / f"_extracted_reference_{ref_name}.wav"
+            torchaudio.save(str(ref_snippet_path), clean_ref_tuple[0], clean_ref_tuple[1])
         except: continue
         
         # Nested progress bar for lines
