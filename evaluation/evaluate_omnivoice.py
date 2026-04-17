@@ -176,6 +176,16 @@ def main():
     from omnivoice import OmniVoice
 
     # Model Loading Logic
+    model_arg = args.model_name
+    resolved_model_path = os.path.abspath(os.path.expanduser(model_arg))
+    looks_like_local_path = (
+        model_arg.startswith(".")
+        or model_arg.startswith("/")
+        or model_arg.startswith("~")
+        or (os.path.sep in model_arg)
+        or (os.path.altsep and os.path.altsep in model_arg)
+    )
+    
     print(f"   Loading model: {model_arg}")
     
     # 1. Handle local paths or specific checkpoint folders
