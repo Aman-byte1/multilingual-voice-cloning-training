@@ -19,7 +19,8 @@ echo "============================================================"
 STEPS=("100")
 
 
-LANGS=("zh" "fr" "ar")
+LANGS=("fr" "ar")
+
 DECLARE_WHISPER=("zh" "fr" "ar")
 
 BASE_OUT_ROOT="./eval_results/full_test_final"
