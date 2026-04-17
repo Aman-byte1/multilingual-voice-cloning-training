@@ -53,11 +53,18 @@ python3 generate_submission.py --lang all --output-dir ./temp_submission
 echo "🔍 Running Validator..."
 for LANG in zh fr ar; do
     echo "  Validating $LANG..."
+    # Smartly find the text file
+    TEXT_FILE="./blind_test/text/$LANG.txt"
+    if [ "$LANG" == "zh" ] && [ ! -f "$TEXT_FILE" ]; then TEXT_FILE="./blind_test/text/chinese.txt"; fi
+    if [ "$LANG" == "ar" ] && [ ! -f "$TEXT_FILE" ]; then TEXT_FILE="./blind_test/text/arabic.txt"; fi
+    if [ "$LANG" == "fr" ] && [ ! -f "$TEXT_FILE" ]; then TEXT_FILE="./blind_test/text/french.txt"; fi
+    
     python3 verify_submission_naming.py ./temp_submission/$LANG \
         --language "$LANG" \
-        --source-file "./blind_test/text/$LANG.txt" \
+        --source-file "$TEXT_FILE" \
         --reference-dir "./blind_test/audio/$LANG"
 done
+
 
 # 5. Final Packaging
 echo "📦 Creating final ZIP files using Python..."

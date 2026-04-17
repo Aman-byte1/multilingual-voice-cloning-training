@@ -10,6 +10,8 @@ import torchaudio
 import argparse
 from tqdm import tqdm
 from pathlib import Path
+from omnivoice import OmniVoice
+from peft import PeftModel
 
 # Final Winning Checkpoints
 BEST_MODELS = {
