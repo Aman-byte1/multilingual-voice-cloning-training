@@ -39,7 +39,7 @@ def count_nonempty_lines(source_file: Path) -> int:
         return sum(1 for line in f if line.strip())
 
 def collect_audio_files(submission_dir: Path) -> List[Path]:
-    return sorted([p for p in submission_dir.rglob("*") if p.is_file()])
+    return sorted([p for p in submission_dir.rglob("*") if p.is_file() and not p.name.startswith("_")])
 
 def collect_reference_names(reference_dir: Path) -> List[str]:
     reference_wavs = sorted([p for p in reference_dir.rglob("*.wav") if p.is_file()])
