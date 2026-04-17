@@ -18,9 +18,10 @@ echo "📥 Downloading blind test data..."
 wget -q --show-progress -O audio.zip "$AUDIO_URL"
 wget -q --show-progress -O text.zip "$TEXT_URL"
 
-echo "📂 Extracting data..."
-unzip -q -o audio.zip -d blind_test/audio
-unzip -q -o text.zip -d blind_test/text
+echo "📂 Extracting data using Python..."
+python3 -m zipfile -e audio.zip blind_test/audio
+python3 -m zipfile -e text.zip blind_test/text
+
 
 # 2. Setup Environment
 echo "🔧 Setting up OmniVoice environment..."
