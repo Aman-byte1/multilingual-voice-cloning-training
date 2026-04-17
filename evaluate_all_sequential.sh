@@ -22,22 +22,23 @@ DECLARE_WHISPER=("zh" "fr" "ar")
 
 BASE_OUT_ROOT="./eval_results/full_test_final"
 
-# 1. Evaluate Baseline
-for i in "${!LANGS[@]}"; do
-    LANG="${LANGS[$i]}"
-    OUT_DIR="${BASE_OUT_ROOT}/baseline/${LANG}"
-    
-    echo ""
-    echo "------------------------------------------------------------"
-    echo "  🔍 Evaluating ${LANG} BASELINE"
-    echo "------------------------------------------------------------"
-    
-    python evaluation/evaluate_omnivoice.py \
-        --model-name "k2-fsa/OmniVoice" \
-        --whisper-lang "${LANG}" \
-        --output-dir "${OUT_DIR}" \
-        --resume
-done
+# 1. Evaluate Baseline (Skipping as already done)
+# for i in "${!LANGS[@]}"; do
+#     LANG="${LANGS[$i]}"
+#     OUT_DIR="${BASE_OUT_ROOT}/baseline/${LANG}"
+#     
+#     echo ""
+#     echo "------------------------------------------------------------"
+#     echo "  🔍 Evaluating ${LANG} BASELINE"
+#     echo "------------------------------------------------------------"
+#     
+#     python evaluation/evaluate_omnivoice.py \
+#         --model-name "k2-fsa/OmniVoice" \
+#         --whisper-lang "${LANG}" \
+#         --output-dir "${OUT_DIR}" \
+#         --resume
+# done
+
 
 # 2. Evaluate Checkpoints from Hugging Face
 for LANG in "${LANGS[@]}"; do
