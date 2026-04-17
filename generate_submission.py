@@ -71,26 +71,39 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     print(f"{'='*60}")
 
     print(f"  Loading champion model {model_name}...")
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+    
     try:
-        # Now that adapter_config.json is fixed, use standard PEFT loading
+        # 1. Load the Base Model
         model = OmniVoice.from_pretrained("k2-fsa/OmniVoice", token=token)
-        model.llm = PeftModel.from_pretrained(model.llm, model_name, token=token)
-        # Optional: merge for speed
-        # model.llm = model.llm.merge_and_unload()
-        print("  ✅ Successfully loaded and merged LoRA champion.")
+        
+        # 2. Download and Load LoRA Weights manually
+        print(f"  📥 Downloading weights from {model_name}...")
+        weights_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", token=token)
+        state_dict = load_file(weights_path)
+        
+        # 3. Clean the state dict prefixes
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            # Strip standard PEFT prefixes
+            new_key = k.replace("llm.base_model.model.", "llm.")
+            new_key = new_key.replace(".base_layer", "")
+            new_key = new_key.replace(".lora_A.default", "") # Load as merged weights
+            new_key = new_key.replace(".lora_B.default", "")
+            new_state_dict[new_key] = v
+            
+        # 4. Load into model
+        msg = model.load_state_dict(new_state_dict, strict=False)
+        print("  ✅ Smart Load successful.")
+        
     except Exception as e:
-        print(f"  ❌ Failed to load champion model {model_name}: {e}")
-        # Try direct load as a last-resort fallback
-        try:
-            print("  🔄 Attempting direct load fallback...")
-            model = OmniVoice.from_pretrained(model_name, token=token)
-            print("  ✅ Loaded as standalone model.")
-        except Exception as e2:
-            print(f"  ❌ Critical failure: {e2}")
-            if lang in FALLBACK_MODELS and model_name != FALLBACK_MODELS[lang]:
-                print(f"  🔄 Retrying with fallback repository: {FALLBACK_MODELS[lang]}")
-                return generate_submission(lang, FALLBACK_MODELS[lang], text_file, ref_dir, out_root, device, token)
-            return
+        print(f"  ❌ Smart Load failed: {e}")
+        if lang in FALLBACK_MODELS and model_name != FALLBACK_MODELS[lang]:
+            print(f"  🔄 Retrying with fallback repository: {FALLBACK_MODELS[lang]}")
+            return generate_submission(lang, FALLBACK_MODELS[lang], text_file, ref_dir, out_root, device, token)
+        return
+
 
 
     model.to(device)
