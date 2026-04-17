@@ -25,14 +25,21 @@ python3 -m zipfile -e text.zip blind_test/text
 
 # 2. Setup Environment
 echo "🔧 Setting up OmniVoice environment..."
-# Apply the flex_attention patch if not already applied
-python3 -c "import os; from pathlib import Path; p = 'OmniVoice/omnivoice/model/omnivoice_llm.py'; [os.system(f'sed -i \"s/flex_attention/eager/g\" {p}') if Path(p).exists() else print('OmniVoice not found')]" || true
+# Locate and patch omnivoice to use 'eager' instead of 'flex_attention' (for older torch versions)
+python3 -c "import omnivoice, os; p = os.path.join(os.path.dirname(omnivoice.__file__), 'model/omnivoice_llm.py'); \
+if os.path.exists(p): \
+    with open(p, 'r') as f: content = f.read(); \
+    with open(p, 'w') as f: f.write(content.replace('flex_attention', 'eager')); \
+    print(f'✅ Patched {p}')
+else: print('⚠ OmniVoice source for patch not found, skipping.')"
 
 # 3. Generate Submission
 echo "🎙️ Starting Inference (this will take 1-2 hours)..."
 export TORCHDYNAMO_DISABLE=1
-export PYTHONPATH="./OmniVoice:$PYTHONPATH"
+# Use ${PYTHONPATH:-} to avoid unbound variable error
+export PYTHONPATH="./OmniVoice:${PYTHONPATH:-}"
 python3 generate_submission.py --lang all --output-dir ./temp_submission
+
 
 # 4. Verification
 echo "🔍 Running Validator..."
