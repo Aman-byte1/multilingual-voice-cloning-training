@@ -31,6 +31,26 @@ MAX_CHARS_PER_CHUNK = 200
 
 def trim_reference_audio(ref_path, max_duration=MAX_REF_DURATION):
     waveform, sr = torchaudio.load(str(ref_path))
+    # Mono conversion if needed
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+    # 1. Smart VAD: Evaluate energy distribution to skip leading silence
+    window_size = int(sr * 0.02)
+    stride = window_size // 2
+    windows = waveform.unfold(-1, window_size, stride)
+    energy = torch.sum(windows**2, dim=-1).squeeze(0)
+    
+    if energy.numel() > 0:
+        threshold = torch.max(energy) * 0.02 # 2% of max energy threshold
+        active = (energy > threshold).nonzero()
+        start_idx = active[0].item() * stride if len(active) > 0 else 0
+    else:
+        start_idx = 0
+        
+    waveform = waveform[:, start_idx:]
+    
+    # 2. Trim to best segment
     max_samples = int(max_duration * sr)
     if waveform.shape[-1] > max_samples:
         waveform = waveform[:, :max_samples]
@@ -164,7 +184,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 audios = []
                 for ct in chunks:
                     with torch.no_grad():
-                        res = model.generate(text=ct, ref_audio=str(tmp_ref))
+                        # Enforce high-stability temperature and top-p during generation
+                        res = model.generate(text=ct, ref_audio=str(tmp_ref), temperature=0.8, top_p=0.9)
                         if isinstance(res, tuple): audio_data, sr = res
                         else: audio_data, sr = res, 16000
                         
@@ -180,7 +201,22 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                             audio_tensor = audio_tensor.unsqueeze(0)
                         audios.append(audio_tensor.cpu())
                 if audios:
-                    torchaudio.save(str(out_path), torch.cat(audios, dim=-1), sr)
+                    # Cross-fade overlap logic to prevent robotic transitions between chunks
+                    final_audio = audios[0]
+                    fade_samples = int(16000 * 1.0) # 1.0s cross-fade
+                    for i in range(1, len(audios)):
+                        a2 = audios[i]
+                        # Allow fading on at most a 3rd of the segment
+                        actual_fade = min(fade_samples, final_audio.shape[-1] // 3, a2.shape[-1] // 3)
+                        if actual_fade > 0:
+                            fade_out = torch.linspace(1.0, 0.0, actual_fade)
+                            fade_in = torch.linspace(0.0, 1.0, actual_fade)
+                            mixed = (final_audio[:, -actual_fade:] * fade_out) + (a2[:, :actual_fade] * fade_in)
+                            final_audio = torch.cat([final_audio[:, :-actual_fade], mixed, a2[:, actual_fade:]], dim=-1)
+                        else:
+                            final_audio = torch.cat([final_audio, a2], dim=-1)
+                            
+                    torchaudio.save(str(out_path), final_audio, sr)
             except Exception as e: print(f" Error {out_path.name}: {e}")
         if tmp_ref.exists(): tmp_ref.unlink()
 
