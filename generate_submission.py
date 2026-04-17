@@ -29,7 +29,36 @@ FALLBACK_MODELS = {
 MAX_REF_DURATION = 15.0
 MAX_CHARS_PER_CHUNK = 200
 
-
+def get_best_reference(ref_path, target_sr=16000, duration=20.0):
+    waveform, sr = torchaudio.load(str(ref_path))
+    
+    # 1. Force Mono
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+    # 2. Resample to 16kHz securely (Crucial to prevent pitch-shifted "Satan" voices)
+    if sr != target_sr:
+        waveform = torchaudio.functional.resample(waveform, orig_freq=sr, new_freq=target_sr)
+        sr = target_sr
+        
+    # 3. VAD Thresholding to skip non-speech
+    window_size = int(sr * 0.05) # 50ms
+    stride = window_size // 2
+    windows = waveform.unfold(-1, window_size, stride)
+    energy = torch.sum(windows**2, dim=-1).squeeze(0)
+    
+    # Find the first frame that exceeds 5% of max energy (clear speech start)
+    threshold = torch.max(energy) * 0.05
+    active_frames = (energy > threshold).nonzero()
+    
+    target_samples = int(duration * sr)
+    start_idx = active_frames[0].item() * stride if len(active_frames) > 0 else 0
+        
+    # Take EXACTLY `duration` seconds of audio starting from speech onset
+    end_idx = start_idx + target_samples
+    best_chunk = waveform[:, start_idx:end_idx]
+    
+    return (best_chunk, sr)
 
 def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
     if len(text) <= max_chars:
@@ -143,11 +172,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     for ref_path in tqdm(ref_audios, desc=f"Ref Audios ({lang})", leave=True):
         ref_name = ref_path.stem
         try:
-            # The user explicitly requested to use the entirety of the 5-minute reference track WITHOUT trimming
-            waveform, sr = torchaudio.load(str(ref_path))
-            if waveform.shape[0] > 1:
-                waveform = torch.mean(waveform, dim=0, keepdim=True)
-            full_ref_tuple = (waveform, sr)
+            # Resample and grab exactly 20s of clean speech to prevent model collapse
+            clean_ref_tuple = get_best_reference(ref_path, target_sr=16000, duration=20.0)
         except: continue
         
         # Nested progress bar for lines
@@ -161,8 +187,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 audios = []
                 for ct in chunks:
                     with torch.no_grad():
-                        # Pass the full 5-minute audio natively without VAD
-                        res = model.generate(text=ct, ref_audio=full_ref_tuple, temperature=0.8, top_p=0.9)
+                        # Pass the safely normalized 20s reference
+                        res = model.generate(text=ct, ref_audio=clean_ref_tuple, temperature=0.8, top_p=0.9)
                         if isinstance(res, tuple): audio_data, sr = res
                         else: audio_data, sr = res, 16000
                         
