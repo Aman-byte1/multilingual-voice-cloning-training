@@ -16,7 +16,8 @@ echo "  GPU: 0 | Split: Full Eval Set"
 echo "============================================================"
 
 # Steps to evaluate
-STEPS=("200" "300" "400")
+STEPS=("100" "200" "300" "400")
+
 LANGS=("zh" "fr" "ar")
 DECLARE_WHISPER=("zh" "fr" "ar")
 
@@ -43,8 +44,14 @@ BASE_OUT_ROOT="./eval_results/full_test_final"
 # 2. Evaluate Checkpoints from Hugging Face
 for LANG in "${LANGS[@]}"; do
     for STEP in "${STEPS[@]}"; do
-        # Use the remote Hugging Face repository name we created earlier
-        HF_REPO="amanuelbyte/omnivoice-lora-${LANG}-${STEP}"
+        # Step 100 is in the original repo (no suffix)
+        # Steps 200, 300, 400 have the -step suffix
+        if [ "${STEP}" == "100" ]; then
+            HF_REPO="amanuelbyte/omnivoice-lora-${LANG}"
+        else
+            HF_REPO="amanuelbyte/omnivoice-lora-${LANG}-${STEP}"
+        fi
+        
         OUT_DIR="${BASE_OUT_ROOT}/step-${STEP}/${LANG}"
         
         echo ""
@@ -60,6 +67,7 @@ for LANG in "${LANGS[@]}"; do
             --resume
     done
 done
+
 
 
 # 3. Generate Comparison Table
