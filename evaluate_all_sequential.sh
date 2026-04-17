@@ -39,29 +39,27 @@ for i in "${!LANGS[@]}"; do
         --resume
 done
 
-# 2. Evaluate Checkpoints
+# 2. Evaluate Checkpoints from Hugging Face
 for LANG in "${LANGS[@]}"; do
     for STEP in "${STEPS[@]}"; do
-        CKPT="./exp/omnivoice_finetuned_${LANG}/checkpoint-${STEP}"
+        # Use the remote Hugging Face repository name we created earlier
+        HF_REPO="amanuelbyte/omnivoice-lora-${LANG}-${STEP}"
         OUT_DIR="${BASE_OUT_ROOT}/step-${STEP}/${LANG}"
         
-        if [ ! -d "${CKPT}" ]; then
-            echo "  ⚠ Skipping ${LANG} Step ${STEP}: ${CKPT} not found"
-            continue
-        fi
-
         echo ""
         echo "------------------------------------------------------------"
-        echo "  🔍 Evaluating ${LANG} — STEP ${STEP}"
+        echo "  🔍 Evaluating ${LANG} — STEP ${STEP} (from Hugging Face)"
+        echo "  Repo: ${HF_REPO}"
         echo "------------------------------------------------------------"
 
         python evaluation/evaluate_omnivoice.py \
-            --model-name "${CKPT}" \
+            --model-name "${HF_REPO}" \
             --whisper-lang "${LANG}" \
             --output-dir "${OUT_DIR}" \
             --resume
     done
 done
+
 
 # 3. Generate Comparison Table
 echo ""
