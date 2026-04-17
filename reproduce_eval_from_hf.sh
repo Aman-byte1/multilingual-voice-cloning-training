@@ -18,10 +18,9 @@ fi
 
 # Install core dependencies
 pip install -q "datasets<2.21.0" "multidict<7.0.0" soundfile librosa jiwer faster-whisper speechbrain peft
-# Ensure tokenizer is available
-pip install -q git+https://github.com/k2-fsa/higgs-audio-v2-tokenizer.git
 
 # Clone and install OmniVoice base code
+
 if [ ! -d "OmniVoice" ]; then
     echo "Cloning OmniVoice base repository..."
     git clone https://github.com/k2-fsa/OmniVoice.git
