@@ -29,44 +29,7 @@ FALLBACK_MODELS = {
 MAX_REF_DURATION = 15.0
 MAX_CHARS_PER_CHUNK = 200
 
-def get_multi_reference_chunks(ref_path, chunk_duration=15.0):
-    waveform, sr = torchaudio.load(str(ref_path))
-    # Mono conversion if needed
-    if waveform.shape[0] > 1:
-        waveform = torch.mean(waveform, dim=0, keepdim=True)
-        
-    # Energy-based VAD thresholding
-    window_size = int(sr * 0.02)
-    stride = window_size // 2
-    windows = waveform.unfold(-1, window_size, stride)
-    energy = torch.sum(windows**2, dim=-1).squeeze(0)
-    
-    threshold = torch.max(energy) * 0.02
-    
-    chunks = []
-    chunk_samples = int(chunk_duration * sr)
-    
-    # Extract up to 4 clean, distinct chunks from the entire 5 minute audio
-    for start in range(0, waveform.shape[-1], chunk_samples):
-        end = start + chunk_samples
-        if end > waveform.shape[-1]: break
-        
-        chunk = waveform[:, start:end]
-        c_win = chunk.unfold(-1, window_size, stride)
-        c_energy = torch.sum(c_win**2, dim=-1).squeeze(0)
-        
-        # Only keep chunks where at least 20% of frames have voice energy
-        if (c_energy > threshold).float().mean().item() > 0.2:
-            chunks.append((chunk, sr))
-            
-        if len(chunks) >= 4:
-            break
-            
-    # Fallback if audio is incredibly quiet
-    if not chunks:
-        chunks.append((waveform[:, :chunk_samples], sr))
-        
-    return chunks
+
 
 def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
     if len(text) <= max_chars:
@@ -180,13 +143,11 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     for ref_path in tqdm(ref_audios, desc=f"Ref Audios ({lang})", leave=True):
         ref_name = ref_path.stem
         try:
-            # Extract 4 deep embeddings from the 5-minute audio instead of just the first 15s
-            ref_chunks = get_multi_reference_chunks(ref_path)
-            
-            # Fuse the cleanest chunks into a single reference audio tensor to avoid batch mismatch errors
-            sr = ref_chunks[0][1]
-            clean_ref_tensor = torch.cat([c[0] for c in ref_chunks], dim=-1)
-            fused_ref = (clean_ref_tensor, sr)
+            # The user explicitly requested to use the entirety of the 5-minute reference track WITHOUT trimming
+            waveform, sr = torchaudio.load(str(ref_path))
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+            full_ref_tuple = (waveform, sr)
         except: continue
         
         # Nested progress bar for lines
@@ -200,8 +161,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 audios = []
                 for ct in chunks:
                     with torch.no_grad():
-                        # Pass the fused multi-reference audio natively
-                        res = model.generate(text=ct, ref_audio=fused_ref, temperature=0.8, top_p=0.9)
+                        # Pass the full 5-minute audio natively without VAD
+                        res = model.generate(text=ct, ref_audio=full_ref_tuple, temperature=0.8, top_p=0.9)
                         if isinstance(res, tuple): audio_data, sr = res
                         else: audio_data, sr = res, 16000
                         
@@ -217,22 +178,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                             audio_tensor = audio_tensor.unsqueeze(0)
                         audios.append(audio_tensor.cpu())
                 if audios:
-                    # Cross-fade overlap logic to prevent robotic transitions between chunks
-                    final_audio = audios[0]
-                    fade_samples = int(16000 * 1.0) # 1.0s cross-fade
-                    for i in range(1, len(audios)):
-                        a2 = audios[i]
-                        # Allow fading on at most a 3rd of the segment
-                        actual_fade = min(fade_samples, final_audio.shape[-1] // 3, a2.shape[-1] // 3)
-                        if actual_fade > 0:
-                            fade_out = torch.linspace(1.0, 0.0, actual_fade)
-                            fade_in = torch.linspace(0.0, 1.0, actual_fade)
-                            mixed = (final_audio[:, -actual_fade:] * fade_out) + (a2[:, :actual_fade] * fade_in)
-                            final_audio = torch.cat([final_audio[:, :-actual_fade], mixed, a2[:, actual_fade:]], dim=-1)
-                        else:
-                            final_audio = torch.cat([final_audio, a2], dim=-1)
-                            
-                    torchaudio.save(str(out_path), final_audio, sr)
+                    # Clean concatenation without problematic cross-fades
+                    torchaudio.save(str(out_path), torch.cat(audios, dim=-1), sr)
             except Exception as e: print(f" Error {out_path.name}: {e}")
 
     del model
