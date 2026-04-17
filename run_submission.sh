@@ -45,14 +45,16 @@ for LANG in zh fr ar; do
 done
 
 # 5. Final Packaging
-echo "📦 Creating final ZIP files..."
+echo "📦 Creating final ZIP files using Python..."
 mkdir -p final_submission
 for LANG in zh fr ar; do
-    cd temp_submission/$LANG
-    zip -q -r "../../final_submission/${TEAM_NAME}_${LANG}.zip" .
-    cd ../..
+    echo "  Zipping $LANG..."
+    # Create the zip using python3 -m zipfile
+    # We use a subshell to ensure we capture the directory correctly
+    (cd temp_submission/$LANG && python3 -c "import zipfile, os; z = zipfile.ZipFile('../../final_submission/${TEAM_NAME}_${LANG}.zip', 'w', zipfile.ZIP_DEFLATED); [z.write(f) for f in os.listdir('.')]; z.close()")
     echo "  ✅ Created final_submission/${TEAM_NAME}_${LANG}.zip"
 done
+
 
 echo "============================================================"
 echo "  🎉 SUBMISSION READY in ./final_submission/"
