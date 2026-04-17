@@ -29,32 +29,44 @@ FALLBACK_MODELS = {
 MAX_REF_DURATION = 15.0
 MAX_CHARS_PER_CHUNK = 200
 
-def trim_reference_audio(ref_path, max_duration=MAX_REF_DURATION):
+def get_multi_reference_chunks(ref_path, chunk_duration=15.0):
     waveform, sr = torchaudio.load(str(ref_path))
     # Mono conversion if needed
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
         
-    # 1. Smart VAD: Evaluate energy distribution to skip leading silence
+    # Energy-based VAD thresholding
     window_size = int(sr * 0.02)
     stride = window_size // 2
     windows = waveform.unfold(-1, window_size, stride)
     energy = torch.sum(windows**2, dim=-1).squeeze(0)
     
-    if energy.numel() > 0:
-        threshold = torch.max(energy) * 0.02 # 2% of max energy threshold
-        active = (energy > threshold).nonzero()
-        start_idx = active[0].item() * stride if len(active) > 0 else 0
-    else:
-        start_idx = 0
-        
-    waveform = waveform[:, start_idx:]
+    threshold = torch.max(energy) * 0.02
     
-    # 2. Trim to best segment
-    max_samples = int(max_duration * sr)
-    if waveform.shape[-1] > max_samples:
-        waveform = waveform[:, :max_samples]
-    return waveform, sr
+    chunks = []
+    chunk_samples = int(chunk_duration * sr)
+    
+    # Extract up to 4 clean, distinct chunks from the entire 5 minute audio
+    for start in range(0, waveform.shape[-1], chunk_samples):
+        end = start + chunk_samples
+        if end > waveform.shape[-1]: break
+        
+        chunk = waveform[:, start:end]
+        c_win = chunk.unfold(-1, window_size, stride)
+        c_energy = torch.sum(c_win**2, dim=-1).squeeze(0)
+        
+        # Only keep chunks where at least 20% of frames have voice energy
+        if (c_energy > threshold).float().mean().item() > 0.2:
+            chunks.append((chunk, sr))
+            
+        if len(chunks) >= 4:
+            break
+            
+    # Fallback if audio is incredibly quiet
+    if not chunks:
+        chunks.append((waveform[:, :chunk_samples], sr))
+        
+    return chunks
 
 def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
     if len(text) <= max_chars:
@@ -168,9 +180,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     for ref_path in tqdm(ref_audios, desc=f"Ref Audios ({lang})", leave=True):
         ref_name = ref_path.stem
         try:
-            tw, tsr = trim_reference_audio(ref_path)
-            tmp_ref = out_dir / f"_temp_ref_{ref_name}.wav"
-            torchaudio.save(str(tmp_ref), tw, tsr)
+            # Extract 4 deep embeddings from the 5-minute audio instead of just the first 15s
+            ref_chunks = get_multi_reference_chunks(ref_path)
         except: continue
         
         # Nested progress bar for lines
@@ -184,8 +195,8 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 audios = []
                 for ct in chunks:
                     with torch.no_grad():
-                        # Enforce high-stability temperature and top-p during generation
-                        res = model.generate(text=ct, ref_audio=str(tmp_ref), temperature=0.8, top_p=0.9)
+                        # Pass list of tuples for native multi-reference embedding averaging
+                        res = model.generate(text=ct, ref_audio=ref_chunks, temperature=0.8, top_p=0.9)
                         if isinstance(res, tuple): audio_data, sr = res
                         else: audio_data, sr = res, 16000
                         
@@ -218,8 +229,6 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                             
                     torchaudio.save(str(out_path), final_audio, sr)
             except Exception as e: print(f" Error {out_path.name}: {e}")
-        if tmp_ref.exists(): tmp_ref.unlink()
-
 
     del model
     torch.cuda.empty_cache()
