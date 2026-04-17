@@ -28,27 +28,29 @@ echo "============================================================"
 for i in "${!LANGUAGES[@]}"; do
     LANG="${LANGUAGES[$i]}"
     LANG_NAME="${LANG_NAMES[$i]}"
-    REPO_NAME="${HF_USER}/omnivoice-lora-${LANG}"
-    
-    # Find the latest checkpoint
     CKPT_DIR="./exp/omnivoice_finetuned_${LANG}"
-    LATEST_CKPT=$(ls -d ${CKPT_DIR}/checkpoint-* 2>/dev/null | sort -t'-' -k2 -n | tail -1)
     
-    if [ -z "${LATEST_CKPT}" ]; then
-        echo "  ⚠ No checkpoint found for ${LANG}, skipping"
+    # Find all checkpoints
+    CHECKPOINTS=$(ls -d ${CKPT_DIR}/checkpoint-* 2>/dev/null | sort -t'-' -k2 -n)
+    
+    if [ -z "${CHECKPOINTS}" ]; then
+        echo "  ⚠ No checkpoints found for ${LANG}, skipping"
         continue
     fi
     
-    echo ""
-    echo "------------------------------------------------------------"
-    echo "  📤 Uploading ${LANG} (${LANG_NAME})"
-    echo "     Checkpoint: ${LATEST_CKPT}"
-    echo "     Repo: ${REPO_NAME}"
-    echo "------------------------------------------------------------"
-    
-    # Create model card
-    STEP=$(basename "${LATEST_CKPT}" | sed 's/checkpoint-//')
-    cat > "${LATEST_CKPT}/README.md" << EOF
+    for CKPT in ${CHECKPOINTS}; do
+        STEP=$(basename "${CKPT}" | sed 's/checkpoint-//')
+        REPO_NAME="${HF_USER}/omnivoice-lora-${LANG}-${STEP}"
+        
+        echo ""
+        echo "------------------------------------------------------------"
+        echo "  📤 Uploading ${LANG} (${LANG_NAME}) — Step ${STEP}"
+        echo "     Path: ${CKPT}"
+        echo "     Repo: ${REPO_NAME}"
+        echo "------------------------------------------------------------"
+        
+        # Create model card
+        cat > "${CKPT}/README.md" << EOF
 ---
 language:
 - ${LANG}
@@ -63,7 +65,7 @@ base_model: k2-fsa/OmniVoice
 library_name: peft
 ---
 
-# OmniVoice LoRA — ${LANG_NAME^} (${LANG})
+# OmniVoice LoRA — ${LANG_NAME^} (${LANG}) — Step ${STEP}
 
 Fine-tuned LoRA adapter for [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) to improve zero-shot voice cloning quality for **${LANG_NAME^}**.
 
@@ -73,7 +75,7 @@ Fine-tuned LoRA adapter for [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice)
 - **Method:** LoRA (rank=32, alpha=64, RSLoRA)
 - **Target modules:** Self-attention + audio projection layers
 - **Training data:** Best-of-N distilled ${LANG_NAME^} speech samples
-- **Steps:** ${STEP}
+- **Steps:** ${STEP} / 400
 - **Precision:** bf16
 - **Hardware:** NVIDIA A40 (48GB)
 
@@ -102,30 +104,33 @@ audio = model.generate(
 )
 \`\`\`
 
-## IWSLT 2026
+## Projects
 
-This adapter was developed for the IWSLT 2026 shared task on cross-lingual voice cloning.
+This adapter was developed for the IWSLT 2026 shared task.
 EOF
 
-    # Upload to HF
-    python3 -c "
+        # Upload to HF
+        python3 -c "
 from huggingface_hub import HfApi
 api = HfApi()
-api.create_repo('${REPO_NAME}', exist_ok=True, private=False, token='${HF_TOKEN}')
-api.upload_folder(
-    folder_path='${LATEST_CKPT}',
-    repo_id='${REPO_NAME}',
-    commit_message='Upload OmniVoice LoRA checkpoint-${STEP} for ${LANG_NAME}',
-    token='${HF_TOKEN}',
-)
-print('  ✅ Uploaded to https://huggingface.co/${REPO_NAME}')
+repo_id = '${REPO_NAME}'
+try:
+    api.create_repo(repo_id=repo_id, exist_ok=True, private=False, token='${HF_TOKEN}')
+    api.upload_folder(
+        folder_path='${CKPT}',
+        repo_id=repo_id,
+        commit_message='Upload OmniVoice LoRA ${LANG_NAME} step ${STEP}',
+        token='${HF_TOKEN}',
+    )
+    print('  ✅ Uploaded to https://huggingface.co/' + repo_id)
+except Exception as e:
+    print(f'  ❌ Error uploading {repo_id}: {e}')
 "
+    done
 done
 
 echo ""
 echo "============================================================"
-echo "  🎉 All checkpoints uploaded!"
-echo "  ${HF_USER}/omnivoice-lora-zh"
-echo "  ${HF_USER}/omnivoice-lora-fr"  
-echo "  ${HF_USER}/omnivoice-lora-ar"
+echo "  🎉 All checkpoints uploaded to individual repos!"
 echo "============================================================"
+
