@@ -73,36 +73,64 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     print(f"  Loading champion model {model_name}...")
     from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file
+    import torch
     
     try:
         # 1. Load the Base Model
         model = OmniVoice.from_pretrained("k2-fsa/OmniVoice", token=token)
         
-        # 2. Download and Load LoRA Weights manually
+        # 2. Download LoRA Weights
         print(f"  📥 Downloading weights from {model_name}...")
         weights_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", token=token)
-        state_dict = load_file(weights_path)
+        sd = load_file(weights_path)
         
-        # 3. Clean the state dict prefixes
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            # Strip standard PEFT prefixes
-            new_key = k.replace("llm.base_model.model.", "llm.")
-            new_key = new_key.replace(".base_layer", "")
-            new_key = new_key.replace(".lora_A.default", "") # Load as merged weights
-            new_key = new_key.replace(".lora_B.default", "")
-            new_state_dict[new_key] = v
+        # 3. Manual Merge Logic
+        print("  🧩 Merging LoRA weights manually...")
+        merged_sd = {}
+        processed_bases = set()
+        
+        # LoRA parameters
+        scaling = 64 / 32 # alpha / r
+        
+        # First, find all keys and identify base vs lora
+        for k in sd.keys():
+            if ".base_layer.weight" in k:
+                base_key = k.replace("llm.base_model.model.", "llm.")
+                clean_key = base_key.replace(".base_layer", "")
+                
+                # Check for matching LoRA components
+                la_key = k.replace(".base_layer.weight", ".lora_A.default.weight")
+                lb_key = k.replace(".base_layer.weight", ".lora_B.default.weight")
+                
+                if la_key in sd and lb_key in sd:
+                    # Perform math: Base + (B @ A) * scaling
+                    A = sd[la_key].to(torch.float32)
+                    B = sd[lb_key].to(torch.float32)
+                    base = sd[k].to(torch.float32)
+                    
+                    merged = base + (B @ A) * scaling
+                    merged_sd[clean_key] = merged.to(sd[k].dtype)
+                    processed_bases.add(k)
+                    processed_bases.add(la_key)
+                    processed_bases.add(lb_key)
             
+        # Carry over non-lora weights (norm, embed, etc.)
+        for k in sd.keys():
+            if k not in processed_bases:
+                clean_key = k.replace("llm.base_model.model.", "llm.")
+                merged_sd[clean_key] = sd[k]
+                
         # 4. Load into model
-        msg = model.load_state_dict(new_state_dict, strict=False)
-        print("  ✅ Smart Load successful.")
+        model.load_state_dict(merged_sd, strict=False)
+        print("  ✅ Smart Merge successful.")
         
     except Exception as e:
-        print(f"  ❌ Smart Load failed: {e}")
+        print(f"  ❌ Smart Merge failed: {e}")
         if lang in FALLBACK_MODELS and model_name != FALLBACK_MODELS[lang]:
             print(f"  🔄 Retrying with fallback repository: {FALLBACK_MODELS[lang]}")
             return generate_submission(lang, FALLBACK_MODELS[lang], text_file, ref_dir, out_root, device, token)
         return
+
 
 
 
