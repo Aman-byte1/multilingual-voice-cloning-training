@@ -145,45 +145,45 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     out_dir = Path(out_root) / lang
     out_dir.mkdir(parents=True, exist_ok=True)
 
-        for ref_path in tqdm(ref_audios, desc=f"Ref Audios ({lang})", leave=True):
-            ref_name = ref_path.stem
-            try:
-                tw, tsr = trim_reference_audio(ref_path)
-                tmp_ref = out_dir / f"_temp_ref_{ref_name}.wav"
-                torchaudio.save(str(tmp_ref), tw, tsr)
-            except: continue
+    for ref_path in tqdm(ref_audios, desc=f"Ref Audios ({lang})", leave=True):
+        ref_name = ref_path.stem
+        try:
+            tw, tsr = trim_reference_audio(ref_path)
+            tmp_ref = out_dir / f"_temp_ref_{ref_name}.wav"
+            torchaudio.save(str(tmp_ref), tw, tsr)
+        except: continue
+        
+        # Nested progress bar for lines
+        for idx, text in enumerate(tqdm(text_lines, desc=f"  Lines ({ref_name[:10]}...)", leave=False)):
+            line_id = f"{idx + 1:0{pad_width}d}"
+            out_path = out_dir / f"{lang}_{line_id}_{ref_name}.wav"
+            if out_path.exists(): continue
             
-            # Nested progress bar for lines
-            for idx, text in enumerate(tqdm(text_lines, desc=f"  Lines ({ref_name[:10]}...)", leave=False)):
-                line_id = f"{idx + 1:0{pad_width}d}"
-                out_path = out_dir / f"{lang}_{line_id}_{ref_name}.wav"
-                if out_path.exists(): continue
-                
-                try:
-                    chunks = split_text_into_chunks(text)
-                    audios = []
-                    for ct in chunks:
-                        with torch.no_grad():
-                            res = model.generate(text=ct, ref_audio=str(tmp_ref))
-                            if isinstance(res, tuple): audio_data, sr = res
-                            else: audio_data, sr = res, 16000
+            try:
+                chunks = split_text_into_chunks(text)
+                audios = []
+                for ct in chunks:
+                    with torch.no_grad():
+                        res = model.generate(text=ct, ref_audio=str(tmp_ref))
+                        if isinstance(res, tuple): audio_data, sr = res
+                        else: audio_data, sr = res, 16000
+                        
+                        if isinstance(audio_data, (list, tuple)):
+                            import numpy as np
+                            audio_tensor = torch.from_numpy(np.array(audio_data))
+                        elif not isinstance(audio_data, torch.Tensor):
+                            audio_tensor = torch.from_numpy(audio_data)
+                        else:
+                            audio_tensor = audio_data
                             
-                            if isinstance(audio_data, (list, tuple)):
-                                # Use numpy intermediate for speed (fixes warning)
-                                import numpy as np
-                                audio_tensor = torch.from_numpy(np.array(audio_data))
-                            elif not isinstance(audio_data, torch.Tensor):
-                                audio_tensor = torch.from_numpy(audio_data)
-                            else:
-                                audio_tensor = audio_data
-                                
-                            if audio_tensor.ndim == 1: 
-                                audio_tensor = audio_tensor.unsqueeze(0)
-                            audios.append(audio_tensor.cpu())
-                    if audios:
-                        torchaudio.save(str(out_path), torch.cat(audios, dim=-1), sr)
-                except Exception as e: print(f" Error {out_path.name}: {e}")
-            if tmp_ref.exists(): tmp_ref.unlink()
+                        if audio_tensor.ndim == 1: 
+                            audio_tensor = audio_tensor.unsqueeze(0)
+                        audios.append(audio_tensor.cpu())
+                if audios:
+                    torchaudio.save(str(out_path), torch.cat(audios, dim=-1), sr)
+            except Exception as e: print(f" Error {out_path.name}: {e}")
+        if tmp_ref.exists(): tmp_ref.unlink()
+
 
     del model
     torch.cuda.empty_cache()
