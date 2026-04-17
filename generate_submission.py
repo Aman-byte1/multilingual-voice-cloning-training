@@ -163,11 +163,27 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 audios = []
                 for ct in chunks:
                     with torch.no_grad():
-                        res = model.generate(ct, str(tmp_ref))
-                        if isinstance(res, tuple): audio_tensor, sr = res
-                        else: audio_tensor, sr = res, 16000 # default
-                        if audio_tensor.ndim == 1: audio_tensor = audio_tensor.unsqueeze(0)
+                        # Use keyword arguments to avoid positional confusion (fixes "Language not recognized" warning)
+                        res = model.generate(text=ct, ref_audio=str(tmp_ref))
+                        
+                        # Handle both tuple (audio, sr) and raw data outputs
+                        if isinstance(res, tuple): 
+                            audio_data, sr = res
+                        else: 
+                            audio_data, sr = res, 16000 # default sr
+                        
+                        # Convert list/array to tensor if needed (fixes 'list' has no attribute 'ndim')
+                        if isinstance(audio_data, (list, tuple)):
+                            audio_tensor = torch.tensor(audio_data)
+                        elif not isinstance(audio_data, torch.Tensor):
+                            audio_tensor = torch.from_numpy(audio_data)
+                        else:
+                            audio_tensor = audio_data
+                            
+                        if audio_tensor.ndim == 1: 
+                            audio_tensor = audio_tensor.unsqueeze(0)
                         audios.append(audio_tensor.cpu())
+
                 if audios:
                     torchaudio.save(str(out_path), torch.cat(audios, dim=-1), sr)
             except Exception as e: print(f" Error {out_path.name}: {e}")
