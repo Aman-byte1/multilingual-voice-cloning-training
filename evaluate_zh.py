@@ -142,7 +142,7 @@ def main():
 
     # 5. Final Output
     print("\n" + "="*70)
-    print(f"🏆 REPRESENTATIVE A/B TEST: BASE vs. STEP 400 LoRA ({len(eval_samples)} samples)")
+    print(f"🏆 REPRESENTATIVE A/B TEST: CHINESE (ZH) - {len(eval_samples)} samples")
     print("="*70)
     print(f"{'Metric':<15} | {'Base Omni':<15} | {'Step 400 LoRA':<15} | {'Improvement'}")
     print("-" * 70)
@@ -151,12 +151,9 @@ def main():
     print("="*70)
     
     if lora_cer < base_cer and lora_sim > base_sim:
-        print("\n✅ STATUS: CLEAR UPGRADE. Step 400 is numerically superior in all metrics.")
+        print("\n✅ STATUS: CLEAR UPGRADE. Step 400 ZH is numerically superior in all metrics.")
     else:
-        print("\n⚠️ STATUS: MIXED. Results show quality trade-offs.")
-
-if __name__ == "__main__":
-    main()
+        print("\n⚠️ STATUS: MIXED. Results show quality trade-offs for Chinese.")
 
 if __name__ == "__main__":
     main()
