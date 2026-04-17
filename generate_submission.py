@@ -190,7 +190,7 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                         # Pass the safely normalized 20s reference
                         res = model.generate(text=ct, ref_audio=clean_ref_tuple, temperature=0.8, top_p=0.9)
                         if isinstance(res, tuple): audio_data, sr = res
-                        else: audio_data, sr = res, 16000
+                        else: audio_data, sr = res, 24000
                         
                         if isinstance(audio_data, (list, tuple)):
                             import numpy as np
