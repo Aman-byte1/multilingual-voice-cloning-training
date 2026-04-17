@@ -28,8 +28,13 @@ fi
 echo "Installing OmniVoice package..."
 cd OmniVoice && pip install -q -e . && cd ..
 
+# Patch flex_attention for older PyTorch / A40 GPUs
+echo "Patching OmniVoice for flex_attention compatibility..."
+python patch_omnivoice_attention.py --omnivoice-dir ./OmniVoice
+
 # Setup PYTHONPATH (Absolute path)
 export PYTHONPATH="$(pwd)/OmniVoice:${PYTHONPATH:-}"
+export TORCHDYNAMO_DISABLE=1
 
 
 
