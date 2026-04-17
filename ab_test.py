@@ -56,8 +56,15 @@ def main():
             if isinstance(res, tuple): audio_data, sr_out = res
             else: audio_data, sr_out = res, 24000
             
-            # Save correctly at 24kHz
-            audio_tensor = torch.from_numpy(audio_data) if not isinstance(audio_data, torch.Tensor) else audio_data
+            # Robust tensor conversion
+            if isinstance(audio_data, (list, tuple)):
+                import numpy as np
+                audio_tensor = torch.from_numpy(np.array(audio_data))
+            elif not isinstance(audio_data, torch.Tensor):
+                audio_tensor = torch.from_numpy(audio_data)
+            else:
+                audio_tensor = audio_data
+                
             if audio_tensor.ndim == 1: audio_tensor = audio_tensor.unsqueeze(0)
             torchaudio.save(path, audio_tensor.cpu(), 24000)
             base_wavs.append(path)
