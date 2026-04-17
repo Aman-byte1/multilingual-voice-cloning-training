@@ -68,27 +68,28 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     print(f"  Model: {model_name}")
     print(f"{'='*60}")
 
-    from omnivoice import OmniVoice
-    from peft import PeftModel
-    
-    print(f"  Attempting to load {model_name}...")
+    print(f"  Loading champion model {model_name}...")
     try:
-        # First try direct loading (for merged/full models)
-        model = OmniVoice.from_pretrained(model_name, token=token)
-        print("  ✅ Loaded as full/merged model.")
+        # Now that adapter_config.json is fixed, use standard PEFT loading
+        model = OmniVoice.from_pretrained("k2-fsa/OmniVoice", token=token)
+        model.llm = PeftModel.from_pretrained(model.llm, model_name, token=token)
+        # Optional: merge for speed
+        # model.llm = model.llm.merge_and_unload()
+        print("  ✅ Successfully loaded and merged LoRA champion.")
     except Exception as e:
-        print(f"  ℹ️ Direct load failed, trying LoRA merge logic: {e}")
+        print(f"  ❌ Failed to load champion model {model_name}: {e}")
+        # Try direct load as a last-resort fallback
         try:
-            model = OmniVoice.from_pretrained("k2-fsa/OmniVoice", token=token)
-            model.llm = PeftModel.from_pretrained(model.llm, model_name, token=token)
-            print("  ✅ Loaded as base + LoRA adapter.")
+            print("  🔄 Attempting direct load fallback...")
+            model = OmniVoice.from_pretrained(model_name, token=token)
+            print("  ✅ Loaded as standalone model.")
         except Exception as e2:
-            print(f"  ❌ Failed to load model {model_name}: {e2}")
-            # Try fallback if available
+            print(f"  ❌ Critical failure: {e2}")
             if lang in FALLBACK_MODELS and model_name != FALLBACK_MODELS[lang]:
-                print(f"  🔄 Retrying with fallback model: {FALLBACK_MODELS[lang]}")
+                print(f"  🔄 Retrying with fallback repository: {FALLBACK_MODELS[lang]}")
                 return generate_submission(lang, FALLBACK_MODELS[lang], text_file, ref_dir, out_root, device, token)
             return
+
 
     model.to(device)
     model.eval()
