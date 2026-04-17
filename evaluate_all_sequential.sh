@@ -15,8 +15,9 @@ echo "  SEQUENTIAL EVALUATION: Baseline vs 200 vs 300 vs 400"
 echo "  GPU: 0 | Split: Full Eval Set"
 echo "============================================================"
 
-# Steps to evaluate
-STEPS=("100" "200" "300" "400")
+# Steps to evaluate (Modified to only run Step 100)
+STEPS=("100")
+
 
 LANGS=("zh" "fr" "ar")
 DECLARE_WHISPER=("zh" "fr" "ar")
