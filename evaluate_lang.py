@@ -80,12 +80,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--lang", required=True, choices=["zh", "ar", "fr"])
     parser.add_argument("--n-segments", type=int, default=25)
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory with generated WAVs (default: temp_submission/{lang})")
     args = parser.parse_args()
 
     LANG       = args.lang
     N_SEG      = args.n_segments
     cfg        = LANG_CONFIG[LANG]
-    OUT_DIR    = f"temp_submission/{LANG}"
+    OUT_DIR    = args.output_dir if args.output_dir else f"temp_submission/{LANG}"
     TEXT_FILE  = cfg["text_file"]
     LORA_LABEL = cfg["lora"]
     REPORT     = f"eval_results_{LANG}_ab.json"
