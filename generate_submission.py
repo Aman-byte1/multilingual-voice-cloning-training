@@ -283,11 +283,21 @@ def main():
         
         tf = next((c for c in t_cands if c.exists()), None)
         rd = next((c for c in r_cands if c.exists() and any(c.glob("*.wav"))), None)
-        if tf and rd: 
-            generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, 
-                               ref_duration=args.ref_duration, 
-                               limit_speakers=args.limit_speakers,
-                               limit_lines=args.limit_lines)
+        
+        if not tf:
+            print(f"  ❌ Skipped {lang}: Text file not found in {args.text_dir} (Checked: {[str(c) for c in t_cands]})")
+            continue
+        if not rd:
+            print(f"  ❌ Skipped {lang}: Reference audio directory not found or empty in {args.audio_dir}")
+            continue
+
+        print(f"  ✅ Using text: {tf}")
+        print(f"  ✅ Using audio: {rd}")
+        
+        generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, 
+                           ref_duration=args.ref_duration, 
+                           limit_speakers=args.limit_speakers,
+                           limit_lines=args.limit_lines)
 
 if __name__ == "__main__":
     main()
