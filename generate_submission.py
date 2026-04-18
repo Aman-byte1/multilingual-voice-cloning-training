@@ -285,10 +285,10 @@ def main():
         rd = next((c for c in r_cands if c.exists() and any(c.glob("*.wav"))), None)
         
         if not tf:
-            print(f"  ❌ Skipped {lang}: Text file not found in {args.text_dir} (Checked: {[str(c) for c in t_cands]})")
+            print(f"  ❌ Skipped {l}: Text file not found in {args.text_dir} (Checked: {[str(c) for c in t_cands]})")
             continue
         if not rd:
-            print(f"  ❌ Skipped {lang}: Reference audio directory not found or empty in {args.audio_dir}")
+            print(f"  ❌ Skipped {l}: Reference audio directory not found or empty in {args.audio_dir}")
             continue
 
         print(f"  ✅ Using text: {tf}")
