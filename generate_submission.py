@@ -88,7 +88,7 @@ def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
     if current_chunk: chunks.append(current_chunk)
     return chunks
 
-def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="cuda", token=None):
+def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="cuda", token=None, ref_duration=10.0):
     print(f"\n{'='*60}")
     print(f"  🚀 Generating submission for {lang.upper()}")
     print(f"  Model: {model_name}")
@@ -172,10 +172,10 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
     for ref_path in tqdm(ref_audios, desc=f"Ref Audios ({lang})", leave=True):
         ref_name = ref_path.stem
         try:
-            # Resample and grab exactly 20s of clean speech to prevent model collapse
-            clean_ref_tuple = get_best_reference(ref_path, target_sr=16000, duration=20.0)
+            # OmniVoice recommends 3-10s of clean speech (longer may degrade quality)
+            clean_ref_tuple = get_best_reference(ref_path, target_sr=16000, duration=ref_duration)
             
-            # Save the cleanly extracted 20s reference so the user can listen and verify
+            # Save the extracted reference so the user can listen and verify
             ref_snippet_path = out_dir / f"_extracted_reference_{ref_name}.wav"
             torchaudio.save(str(ref_snippet_path), clean_ref_tuple[0], clean_ref_tuple[1])
         except: continue
@@ -223,6 +223,8 @@ def main():
     parser.add_argument("--text-dir", default="./blind_test/text")
     parser.add_argument("--audio-dir", default="./blind_test/audio")
     parser.add_argument("--output-dir", default="./submission_outputs")
+    parser.add_argument("--ref-duration", type=float, default=10.0,
+                        help="Reference audio duration in seconds (OmniVoice recommends 3-10s)")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
     args = parser.parse_args()
 
@@ -234,7 +236,7 @@ def main():
         
         tf = next((c for c in t_cands if c.exists()), None)
         rd = next((c for c in r_cands if c.exists() and any(c.glob("*.wav"))), None)
-        if tf and rd: generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token)
+        if tf and rd: generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, ref_duration=args.ref_duration)
 
 if __name__ == "__main__":
     main()
