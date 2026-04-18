@@ -1,159 +1,207 @@
-import os
+#!/usr/bin/env python3
+"""
+IWSLT 2026 — Chinese (ZH) A/B Evaluation
+Base OmniVoice vs. Step-400 LoRA on Blind Test
+Metrics: WER, CER, Speaker Similarity
+Sample: 25 segments × 12 speakers = 300 pairs
+"""
+import os, sys, gc, json
 import torch
 import torchaudio
 import torch.nn.functional as F
 from tqdm import tqdm
 import jiwer
 import numpy as np
-import json
-import csv
 
-# Metrics tools
-from faster_whisper import WhisperModel
-from speechbrain.inference.speaker import SpeakerRecognition
-
-def extract_speaker_embedding(path, model, device="cuda"):
+# ── helpers ─────────────────────────────────────────────────────
+def extract_speaker_embedding(path, verifier, device="cuda"):
     try:
-        waveform, sr = torchaudio.load(path)
+        wav, sr = torchaudio.load(path)
         if sr != 16000:
-            waveform = torchaudio.functional.resample(waveform, sr, 16000)
+            wav = torchaudio.functional.resample(wav, sr, 16000)
         with torch.no_grad():
-            emb = model.encode_batch(waveform.to(device)).squeeze(0).squeeze(0)
+            emb = verifier.encode_batch(wav.to(device)).squeeze(0).squeeze(0)
         return emb
-    except:
+    except Exception:
         return None
 
+def safe_tensor(audio_data):
+    """Convert any model output to a (1, T) float tensor."""
+    if isinstance(audio_data, (list, tuple)):
+        t = torch.from_numpy(np.array(audio_data))
+    elif not isinstance(audio_data, torch.Tensor):
+        t = torch.from_numpy(audio_data)
+    else:
+        t = audio_data
+    if t.ndim == 1:
+        t = t.unsqueeze(0)
+    return t.cpu().float()
+
+# ── main ────────────────────────────────────────────────────────
 def main():
-    lang = "zh"
-    out_dir = f"temp_submission/{lang}"
-    text_file = "blind_test/text/chinese.txt"
-    report_file = "eval_results_zh_sample.json"
-    
-    if not os.path.exists(out_dir):
-        print(f"Error: {out_dir} not found.")
+    LANG        = "zh"
+    OUT_DIR     = f"temp_submission/{LANG}"
+    TEXT_FILE   = "blind_test/text/chinese.txt"
+    N_SEGMENTS  = 25
+    REPORT_FILE = "eval_results_zh_ab.json"
+
+    if not os.path.exists(OUT_DIR):
+        print(f"❌ {OUT_DIR} not found. Run generate_submission.py first.")
         return
 
-    # 1. Load Ground Truth Text (First 25 lines)
-    with open(text_file, "r", encoding="utf-8") as f:
-        text_lines = [l.strip() for l in f if l.strip()][:25]
-    
-    # 2. Map generated files for ALL 12 speakers (first 25 lines each)
-    all_files = os.listdir(out_dir)
-    speakers = list(set(["_".join(f.split("_")[2:]).replace(".wav", "") 
-                         for f in all_files if f.startswith(f"{lang}_") and f.endswith(".wav") and not f.startswith("_")]))
-    speakers.sort()
+    # 1. Ground-truth text (first N_SEGMENTS lines)
+    with open(TEXT_FILE, "r", encoding="utf-8") as f:
+        text_lines = [l.strip() for l in f if l.strip()][:N_SEGMENTS]
+
+    # 2. Discover speakers and build sample list
+    all_files = os.listdir(OUT_DIR)
+    speakers = sorted(set(
+        "_".join(fn.split("_")[2:]).replace(".wav", "")
+        for fn in all_files
+        if fn.startswith(f"{LANG}_") and fn.endswith(".wav") and not fn.startswith("_")
+    ))
 
     eval_samples = []
-    for ref_name in speakers:
-        for i in range(1, 26): # First 25 segments
-            fname = f"{lang}_{i:03d}_{ref_name}.wav"
-            if os.path.exists(os.path.join(out_dir, fname)):
-                eval_samples.append({"file": fname, "speaker": ref_name, "idx": i-1})
+    for spk in speakers:
+        for i in range(1, N_SEGMENTS + 1):
+            fname = f"{LANG}_{i:03d}_{spk}.wav"
+            if os.path.exists(os.path.join(OUT_DIR, fname)):
+                eval_samples.append({"file": fname, "speaker": spk, "idx": i - 1})
 
-    print(f"🔍 Sampling {len(eval_samples)} files (25 segments across {len(speakers)} voices) for A/B check.")
-        
+    print(f"🔍  {len(eval_samples)} samples ({N_SEGMENTS} segs × {len(speakers)} voices)")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # 3. GENERATE BASE OMNIVOICE FOR COMPARISON (To match ab_test.py style)
-    print("\n🚀 Loading BASE OmniVoice for A/B Benchmark...")
+
+    # ── 3. Generate BASE OmniVoice counterparts ─────────────────
+    print("\n🚀 Loading BASE OmniVoice…")
     from omnivoice import OmniVoice
     base_model = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
     base_model.to(device).eval()
-    
-    base_results_dir = "eval_base_zh_samples"
-    os.makedirs(base_results_dir, exist_ok=True)
-    
-    base_files_map = {}
-    print(f"🎙️ Generating Base Model counterparts...")
-    for ref_name in tqdm(speakers, desc="Speakers"):
-        ref_path = os.path.join(out_dir, f"_extracted_reference_{ref_name}.wav")
-        if not os.path.exists(ref_path): ref_path = f"blind_test/audio/zh/{ref_name}.wav"
-        
-        waveform, sr_in = torchaudio.load(ref_path)
-        ref_tuple = (waveform, sr_in)
-        
-        for i in range(25):
-            path = os.path.join(base_results_dir, f"base_{i}_{ref_name}.wav")
-            base_files_map[(ref_name, i)] = path
-            if os.path.exists(path): continue
-            
+
+    base_dir = "eval_base_zh_samples"
+    os.makedirs(base_dir, exist_ok=True)
+    base_map = {}
+
+    print("🎙️  Generating base-model audio…")
+    for spk in tqdm(speakers, desc="Speakers"):
+        # Find reference
+        ref_path = os.path.join(OUT_DIR, f"_extracted_reference_{spk}.wav")
+        if not os.path.exists(ref_path):
+            ref_path = f"blind_test/audio/{spk}.wav"
+        wav, sr_in = torchaudio.load(ref_path)
+        ref_tuple = (wav, sr_in)
+
+        for i in range(N_SEGMENTS):
+            out_path = os.path.join(base_dir, f"base_{i}_{spk}.wav")
+            base_map[(spk, i)] = out_path
+            if os.path.exists(out_path):
+                continue
             with torch.no_grad():
-                res = base_model.generate(text=text_lines[i], ref_audio=ref_tuple, temperature=0.8, top_p=0.9)
-                if isinstance(res, tuple): audio_data, _ = res
-                else: audio_data = res
-                
-                # Robust tensor conversion
-                if isinstance(audio_data, (list, tuple)):
-                    audio_tensor = torch.from_numpy(np.array(audio_data))
-                elif not isinstance(audio_data, torch.Tensor):
-                    audio_tensor = torch.from_numpy(audio_data)
-                else:
-                    audio_tensor = audio_data
-                
-                if audio_tensor.ndim == 1: audio_tensor = audio_tensor.unsqueeze(0)
-                torchaudio.save(path, audio_tensor.cpu(), 24000)
-    
+                res = base_model.generate(text=text_lines[i], ref_audio=ref_tuple,
+                                          temperature=0.8, top_p=0.9)
+                audio_data = res[0] if isinstance(res, tuple) else res
+                torchaudio.save(out_path, safe_tensor(audio_data), 24000)
+
     del base_model
     torch.cuda.empty_cache()
+    gc.collect()
 
-    # 4. RUN EVALUATION
-    print("\n🔎 Loading Evaluation Models...")
+    # ── 4. Load evaluation models ───────────────────────────────
+    print("\n🔎 Loading Whisper-large-v3 + ECAPA-TDNN…")
     from faster_whisper import WhisperModel
     from speechbrain.inference.speaker import SpeakerRecognition
-    whisper = WhisperModel("large-v3", device=device, compute_type="float16" if device=="cuda" else "int8")
+
+    whisper = WhisperModel("large-v3", device=device,
+                           compute_type="float16" if device == "cuda" else "int8")
     verifier = SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
-        run_opts={"device": device}
+        run_opts={"device": device},
     )
-    
-    def get_metrics(file_list, is_base=False):
-        results = []
-        transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
-        
-        # Pre-cache ref embeddings
-        ref_embs = {}
-        for ref_name in speakers:
-            ref_path = os.path.join(out_dir, f"_extracted_reference_{ref_name}.wav")
-            if not os.path.exists(ref_path): ref_path = f"blind_test/audio/zh/{ref_name}.wav"
-            ref_embs[ref_name] = extract_speaker_embedding(ref_path, verifier, device)
 
-        for s in tqdm(file_list, desc="Evaluating"):
+    # Pre-cache reference embeddings
+    ref_embs = {}
+    for spk in speakers:
+        ref_path = os.path.join(OUT_DIR, f"_extracted_reference_{spk}.wav")
+        if not os.path.exists(ref_path):
+            ref_path = f"blind_test/audio/{spk}.wav"
+        ref_embs[spk] = extract_speaker_embedding(ref_path, verifier, device)
+
+    # ── 5. Evaluate ─────────────────────────────────────────────
+    transforms = jiwer.Compose([jiwer.ToLowerCase(),
+                                jiwer.RemoveMultipleSpaces(),
+                                jiwer.Strip()])
+
+    def score_set(file_list, label):
+        results = []
+        for s in tqdm(file_list, desc=f"Eval ({label})"):
             path = s["path"]
             ref_emb = ref_embs.get(s["speaker"])
-            # Sim
+
+            # Speaker similarity
             emb = extract_speaker_embedding(path, verifier, device)
-            sim = float(F.cosine_similarity(emb.unsqueeze(0), ref_emb.unsqueeze(0)).item()) if (emb is not None and ref_emb is not None) else 0.0
-            # CER
+            sim = (float(F.cosine_similarity(emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
+                   if emb is not None and ref_emb is not None else 0.0)
+
+            # ASR → CER + WER
             try:
-                segments, _ = whisper.transcribe(path, language=lang)
-                tx = "".join([s.text for s in segments])
-                c_val = jiwer.cer(transforms(text_lines[s["idx"]]), transforms(tx))
-            except: c_val = 1.0
-            results.append({"sim": sim, "cer": c_val})
-        return np.mean([r["sim"] for r in results]), np.mean([r["cer"] for r in results])
+                segs, _ = whisper.transcribe(path, language=LANG)
+                hyp = "".join([seg.text for seg in segs])
+                ref_text = text_lines[s["idx"]]
+                cer = jiwer.cer(transforms(ref_text), transforms(hyp))
+                wer = jiwer.wer(transforms(ref_text), transforms(hyp))
+            except Exception:
+                cer, wer = 1.0, 1.0
 
-    # Comparison Prep
-    lora_samples = [{"path": os.path.join(out_dir, s["file"]), "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
-    base_samples = [{"path": base_files_map[(s["speaker"], s["idx"])], "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
+            results.append({"sim": sim, "cer": cer, "wer": wer})
 
-    lora_sim, lora_cer = get_metrics(lora_samples)
-    base_sim, base_cer = get_metrics(base_samples)
+        avg = lambda k: float(np.mean([r[k] for r in results]))
+        return avg("cer"), avg("wer"), avg("sim"), results
 
-    # 5. Final Output
-    print("\n" + "="*70)
-    print(f"🏆 REPRESENTATIVE A/B TEST: CHINESE (ZH) - {len(eval_samples)} samples")
-    print("="*70)
-    print(f"{'Metric':<15} | {'Base Omni':<15} | {'Step 400 LoRA':<15} | {'Improvement'}")
-    print("-" * 70)
-    print(f"{'CER (Lower ↓)':<15} | {base_cer:<15.4f} | {lora_cer:<15.4f} | {((base_cer-lora_cer)/base_cer)*100:+.1f}%")
-    print(f"{'Sim (Higher ↑)':<15} | {base_sim:<15.4f} | {lora_sim:<15.4f} | {((lora_sim-base_sim)/base_sim)*100:+.1f}%")
-    print("="*70)
-    
-    if lora_cer < base_cer and lora_sim > base_sim:
-        print("\n✅ STATUS: CLEAR UPGRADE. Step 400 ZH is numerically superior in all metrics.")
+    lora_list = [{"path": os.path.join(OUT_DIR, s["file"]),
+                  "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
+    base_list = [{"path": base_map[(s["speaker"], s["idx"])],
+                  "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
+
+    lora_cer, lora_wer, lora_sim, lora_raw = score_set(lora_list, "LoRA-400")
+    base_cer, base_wer, base_sim, base_raw = score_set(base_list, "Base")
+
+    # ── 6. Report ───────────────────────────────────────────────
+    def pct(base_v, new_v, lower_better=True):
+        if base_v == 0: return "+0.0%"
+        diff = ((base_v - new_v) / base_v) * 100 if lower_better else ((new_v - base_v) / base_v) * 100
+        return f"{diff:+.1f}%"
+
+    W = 70
+    print("\n" + "=" * W)
+    print(f"🏆  CHINESE (ZH) A/B TEST — {len(eval_samples)} samples")
+    print("=" * W)
+    print(f"{'Metric':<16}| {'Base OmniVoice':<16}| {'LoRA Step-400':<16}| {'Δ Improvement'}")
+    print("-" * W)
+    print(f"{'CER  (↓)':<16}| {base_cer:<16.4f}| {lora_cer:<16.4f}| {pct(base_cer, lora_cer, True)}")
+    print(f"{'WER  (↓)':<16}| {base_wer:<16.4f}| {lora_wer:<16.4f}| {pct(base_wer, lora_wer, True)}")
+    print(f"{'SIM  (↑)':<16}| {base_sim:<16.4f}| {lora_sim:<16.4f}| {pct(base_sim, lora_sim, False)}")
+    print("=" * W)
+
+    wins = sum([lora_cer < base_cer, lora_wer < base_wer, lora_sim > base_sim])
+    if wins == 3:
+        print("\n✅ CLEAR UPGRADE — LoRA wins on all 3 metrics.")
+    elif wins >= 2:
+        print("\n✅ UPGRADE — LoRA wins on 2/3 metrics.")
     else:
-        print("\n⚠️ STATUS: MIXED. Results show quality trade-offs for Chinese.")
+        print("\n⚠️  MIXED — trade-offs detected.")
+
+    # Save JSON
+    report = {
+        "language": "zh",
+        "n_samples": len(eval_samples),
+        "base":  {"cer": base_cer, "wer": base_wer, "sim": base_sim},
+        "lora":  {"cer": lora_cer, "wer": lora_wer, "sim": lora_sim},
+    }
+    with open(REPORT_FILE, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"\n📄 Saved → {REPORT_FILE}")
+
 
 if __name__ == "__main__":
     main()
