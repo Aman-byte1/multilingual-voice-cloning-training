@@ -126,7 +126,8 @@ def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
     if current_chunk: chunks.append(current_chunk)
     return chunks
 
-def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="cuda", token=None, ref_duration=10.0):
+def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="cuda", token=None, 
+                        ref_duration=10.0, limit_speakers=0, limit_lines=0):
     print(f"\n{'='*60}")
     print(f"  🚀 Generating submission for {lang.upper()}")
     print(f"  Model: {model_name}")
@@ -202,8 +203,13 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
 
     with open(text_file, "r", encoding="utf-8") as f:
         text_lines = [line.strip() for line in f if line.strip()]
+    if limit_lines > 0:
+        text_lines = text_lines[:limit_lines]
     
     ref_audios = sorted(list(Path(ref_dir).glob("*.wav")))
+    if limit_speakers > 0:
+        ref_audios = ref_audios[:limit_speakers]
+
     pad_width = max(3, len(str(len(text_lines))))
     out_dir = Path(out_root) / lang
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -265,6 +271,8 @@ def main():
     parser.add_argument("--ref-duration", type=float, default=10.0,
                         help="Reference audio duration in seconds (OmniVoice recommends 3-10s)")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
+    parser.add_argument("--limit-speakers", type=int, default=0, help="Limit number of speakers to process")
+    parser.add_argument("--limit-lines", type=int, default=0, help="Limit number of lines per speaker to generate")
     args = parser.parse_args()
 
     langs = ["zh", "ar", "fr"] if args.lang == "all" else [args.lang]
@@ -275,7 +283,11 @@ def main():
         
         tf = next((c for c in t_cands if c.exists()), None)
         rd = next((c for c in r_cands if c.exists() and any(c.glob("*.wav"))), None)
-        if tf and rd: generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, ref_duration=args.ref_duration)
+        if tf and rd: 
+            generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, 
+                               ref_duration=args.ref_duration, 
+                               limit_speakers=args.limit_speakers,
+                               limit_lines=args.limit_lines)
 
 if __name__ == "__main__":
     main()
