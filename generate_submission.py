@@ -5,11 +5,42 @@ Fixed for direct model loading and robust file discovery.
 """
 import os
 import gc
+import sys
+import types
 import torch
 import torchaudio
 import argparse
 from tqdm import tqdm
 from pathlib import Path
+from functools import partial
+
+# ── flex_attention stub (for older PyTorch) ─────────────────────
+def _install_flex_stub():
+    mod_name = "torch.nn.attention.flex_attention"
+    if mod_name in sys.modules:
+        return
+    try:
+        import torch.nn.attention as attn_mod
+        stub = types.ModuleType(mod_name)
+        def create_block_mask(mask_mod, B=None, H=None, Q_LEN=None, KV_LEN=None,
+                              _compile=False, device=None, **kw):
+            seq_len = int(Q_LEN or KV_LEN or 1)
+            if isinstance(mask_mod, partial) and mask_mod.args:
+                d = mask_mod.args[0]
+                if torch.is_tensor(d):
+                    seq_len = int(d.numel())
+            causal = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
+            mask = torch.zeros((1, 1, seq_len, seq_len), device=device, dtype=torch.float32)
+            mask.masked_fill_(~causal.unsqueeze(0).unsqueeze(0), torch.finfo(mask.dtype).min)
+            return mask
+        stub.create_block_mask = create_block_mask
+        sys.modules[mod_name] = stub
+        setattr(attn_mod, "flex_attention", stub)
+    except Exception:
+        pass
+
+_install_flex_stub()
+
 from omnivoice import OmniVoice
 from peft import PeftModel
 
