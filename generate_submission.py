@@ -127,7 +127,7 @@ def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
     return chunks
 
 def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="cuda", token=None, 
-                        ref_duration=10.0, limit_speakers=0, limit_lines=0):
+                        ref_duration=10.0, limit_speakers=0, limit_lines=0, scaling_mode="rs"):
     print(f"\n{'='*60}")
     print(f"  🚀 Generating submission for {lang.upper()}")
     print(f"  Model: {model_name}")
@@ -152,9 +152,15 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
         merged_sd = {}
         processed_bases = set()
         
-        # LoRA parameters — RSLoRA uses alpha / sqrt(r), NOT alpha / r
+        # LoRA parameters
         import math
-        scaling = 64 / math.sqrt(32)  # alpha / sqrt(r) ≈ 11.31
+        alpha, r = 64, 32
+        if scaling_mode == "rs":
+            scaling = alpha / math.sqrt(r)  # RSLoRA: ~11.31
+            print(f"  ⚖️  Using RSLoRA scaling: {scaling:.4f}")
+        else:
+            scaling = alpha / r             # Standard LoRA: 2.0
+            print(f"  ⚖️  Using Standard scaling: {scaling:.4f}")
         
         # First, find all keys and identify base vs lora
         for k in sd.keys():
@@ -273,6 +279,8 @@ def main():
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
     parser.add_argument("--limit-speakers", type=int, default=0, help="Limit number of speakers to process")
     parser.add_argument("--limit-lines", type=int, default=0, help="Limit number of lines per speaker to generate")
+    parser.add_argument("--scaling-mode", type=str, default="rs", choices=["rs", "standard"], 
+                        help="LoRA scaling mode: 'rs' (alpha/sqrt(r)) or 'standard' (alpha/r)")
     args = parser.parse_args()
 
     langs = ["zh", "ar", "fr"] if args.lang == "all" else [args.lang]
@@ -297,7 +305,8 @@ def main():
         generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, 
                            ref_duration=args.ref_duration, 
                            limit_speakers=args.limit_speakers,
-                           limit_lines=args.limit_lines)
+                           limit_lines=args.limit_lines,
+                           scaling_mode=args.scaling_mode)
 
 if __name__ == "__main__":
     main()
