@@ -151,8 +151,9 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
         merged_sd = {}
         processed_bases = set()
         
-        # LoRA parameters
-        scaling = 64 / 32 # alpha / r
+        # LoRA parameters — RSLoRA uses alpha / sqrt(r), NOT alpha / r
+        import math
+        scaling = 64 / math.sqrt(32)  # alpha / sqrt(r) ≈ 11.31
         
         # First, find all keys and identify base vs lora
         for k in sd.keys():
