@@ -10,33 +10,15 @@ import types
 import torch
 import torchaudio
 import argparse
+import glob
 from tqdm import tqdm
 from pathlib import Path
 from functools import partial
 
 # ── OmniVoice compatibility patch ──────────────────────────────
-# Step 1: Patch OmniVoice source to use 'eager' attention (same as run_submission.sh)
-def _patch_omnivoice_source():
-    try:
-        import omnivoice as _ov
-        p = os.path.join(os.path.dirname(_ov.__file__), 'model', 'omnivoice_llm.py')
-        # Try alternate paths
-        if not os.path.exists(p):
-            p = os.path.join(os.path.dirname(_ov.__file__), 'models', 'omnivoice_llm.py')
-        if not os.path.exists(p):
-            # Search for the file
-            import glob
-            candidates = glob.glob(os.path.join(os.path.dirname(_ov.__file__), '**', 'omnivoice_llm.py'), recursive=True)
-            p = candidates[0] if candidates else None
-        if p and os.path.exists(p):
-            with open(p, 'r') as f: content = f.read()
-            if 'flex_attention' in content:
-                with open(p, 'w') as f: f.write(content.replace('flex_attention', 'eager'))
-                print(f'  ✅ Patched OmniVoice → eager attention: {p}')
-    except Exception:
-        pass
+# Must happen BEFORE importing omnivoice
 
-# Step 2: Install minimal stub so `from torch.nn.attention.flex_attention import ...` doesn't crash
+# Step 1: Stub the missing module so import doesn't crash
 def _install_flex_stub():
     mod_name = "torch.nn.attention.flex_attention"
     if mod_name in sys.modules:
@@ -44,14 +26,29 @@ def _install_flex_stub():
     try:
         import torch.nn.attention as attn_mod
         stub = types.ModuleType(mod_name)
-        stub.create_block_mask = lambda *a, **kw: None  # Never actually used with eager mode
+        stub.create_block_mask = lambda *a, **kw: None
         sys.modules[mod_name] = stub
         setattr(attn_mod, "flex_attention", stub)
     except Exception:
         pass
 
-_install_flex_stub()   # Must come first so import doesn't crash
-_patch_omnivoice_source()  # Then patch source to use eager
+# Step 2: Patch source file WITHOUT importing omnivoice (find via site-packages)
+def _patch_omnivoice_source():
+    import site
+    search_dirs = site.getsitepackages() + [site.getusersitepackages()]
+    for sp in search_dirs:
+        candidates = glob.glob(os.path.join(sp, 'omnivoice', '**', 'omnivoice_llm.py'), recursive=True)
+        for p in candidates:
+            try:
+                with open(p, 'r') as f: content = f.read()
+                if 'flex_attention' in content:
+                    with open(p, 'w') as f: f.write(content.replace('flex_attention', 'eager'))
+                    print(f'  ✅ Patched OmniVoice → eager attention: {p}')
+            except Exception:
+                pass
+
+_install_flex_stub()
+_patch_omnivoice_source()
 
 # Now safe to import
 from omnivoice import OmniVoice
@@ -73,19 +70,15 @@ FALLBACK_MODELS = {
 MAX_REF_DURATION = 15.0
 MAX_CHARS_PER_CHUNK = 200
 
-def get_best_reference(ref_path, target_sr=16000, duration=20.0):
+def get_best_reference(ref_path, duration=10.0):
+    """Extract clean speech segment at ORIGINAL sample rate (let OmniVoice resample)."""
     waveform, sr = torchaudio.load(str(ref_path))
     
     # 1. Force Mono
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
         
-    # 2. Resample to 16kHz securely (Crucial to prevent pitch-shifted "Satan" voices)
-    if sr != target_sr:
-        waveform = torchaudio.functional.resample(waveform, orig_freq=sr, new_freq=target_sr)
-        sr = target_sr
-        
-    # 3. VAD Thresholding to skip non-speech
+    # 2. VAD Thresholding to skip non-speech
     window_size = int(sr * 0.05) # 50ms
     stride = window_size // 2
     windows = waveform.unfold(-1, window_size, stride)
@@ -102,6 +95,7 @@ def get_best_reference(ref_path, target_sr=16000, duration=20.0):
     end_idx = start_idx + target_samples
     best_chunk = waveform[:, start_idx:end_idx]
     
+    # Return at ORIGINAL sample rate — OmniVoice handles resampling internally
     return (best_chunk, sr)
 
 def split_text_into_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
@@ -217,7 +211,7 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
         ref_name = ref_path.stem
         try:
             # OmniVoice recommends 3-10s of clean speech (longer may degrade quality)
-            clean_ref_tuple = get_best_reference(ref_path, target_sr=16000, duration=ref_duration)
+            clean_ref_tuple = get_best_reference(ref_path, duration=ref_duration)
             
             # Save the extracted reference so the user can listen and verify
             ref_snippet_path = out_dir / f"_extracted_reference_{ref_name}.wav"
