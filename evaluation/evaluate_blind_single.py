@@ -326,10 +326,13 @@ def main():
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
         torch.backends.cudnn.enabled = False
         model = ChatterboxMultilingualTTS.from_pretrained(device=device)
-        # Force model to GPU if it silently fell back to CPU
+        # Force internal models to GPU (wrapper class doesn't support .to())
         if device == "cuda":
-            model = model.to("cuda")
-        print(f"  📍 Chatterbox device: {next(model.parameters()).device}")
+            for attr_name in dir(model):
+                attr = getattr(model, attr_name, None)
+                if isinstance(attr, torch.nn.Module):
+                    attr.to("cuda")
+                    print(f"  📍 Moved {attr_name} → cuda")
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_chatterbox(text, ref, lang, dev, model)
 
     elif model_name == "omnivoice":
