@@ -20,6 +20,10 @@ import time
 import argparse
 import torch
 import torchaudio
+try:
+    torchaudio.set_audio_backend("soundfile")
+except:
+    pass # Older versions might not have this method or might not need it
 import numpy as np
 from tqdm import tqdm
 import warnings
