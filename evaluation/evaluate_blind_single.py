@@ -26,11 +26,18 @@ import warnings
 import glob
 import torch.nn.functional as F
 
-# --- Monkey Patch HuggingFace Hub (Fixes version conflicts between SpeechBrain and Transformers) ---
+# --- Monkey Patch HuggingFace Hub ---
 import huggingface_hub
 if not hasattr(huggingface_hub, "is_offline_mode"):
     huggingface_hub.is_offline_mode = lambda: os.environ.get("HF_HUB_OFFLINE", "0") == "1"
 
+# Fix SpeechBrain passing the removed 'use_auth_token' argument
+_orig_download = huggingface_hub.hf_hub_download
+def _patched_download(*args, **kwargs):
+    if "use_auth_token" in kwargs:
+        kwargs["token"] = kwargs.pop("use_auth_token")
+    return _orig_download(*args, **kwargs)
+huggingface_hub.hf_hub_download = _patched_download
 # ------------------------------------
 
 warnings.filterwarnings("ignore")
