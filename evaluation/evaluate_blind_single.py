@@ -130,6 +130,22 @@ def safe_load_audio(path):
             data = data.T # (T, C) -> (C, T)
         return torch.from_numpy(data).float(), sr
 
+def safe_save_audio(path, wav, sr):
+    """Fallback saver to bypass broken torchaudio/torchcodec versions."""
+    import soundfile as sf
+    try:
+        # Try standard torchaudio first
+        return torchaudio.save(path, wav, sr)
+    except Exception:
+        # Fallback to soundfile
+        if isinstance(wav, torch.Tensor):
+            data = wav.detach().cpu().numpy()
+        else:
+            data = wav
+        if len(data.shape) == 2:
+            data = data.T # (C, T) -> (T, C)
+        sf.write(path, data, sr)
+
 def get_best_reference(ref_path, duration=10.0):
     waveform, sr = safe_load_audio(str(ref_path))
     if waveform.shape[0] > 1:
@@ -348,7 +364,7 @@ def main():
                 # This ensures consistent audio/transcript for all models
                 ref_wav, ref_sr = get_best_reference(raw_ref_path, duration=10.0)
                 temp_ref_path = os.path.join(out_dir, f"temp_ref_{voice_id}.wav")
-                torchaudio.save(temp_ref_path, ref_wav, ref_sr)
+                safe_save_audio(temp_ref_path, ref_wav, ref_sr)
                 
                 ref_tuple = (ref_wav, ref_sr)
 
@@ -362,7 +378,7 @@ def main():
                             # Use temp_ref_path for all models now
                             wav_out, sr = gen_fn(text, temp_ref_path, lang, device, ref_tuple)
                             t1 = time.perf_counter()
-                            torchaudio.save(syn_path, wav_out, sr)
+                            safe_save_audio(syn_path, wav_out, sr)
                             inf_time = t1 - t0
                         except Exception as e:
                             tqdm.write(f"   ⚠ {voice_id}/line{idx}: {e}")
