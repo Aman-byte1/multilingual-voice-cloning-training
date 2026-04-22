@@ -334,6 +334,9 @@ def main():
         from TTS.api import TTS
         use_gpu = device == "cuda" or str(device).startswith("cuda")
         model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=use_gpu)
+        # Explicitly move synthesizer model to GPU if available
+        if use_gpu and hasattr(model, 'synthesizer') and hasattr(model.synthesizer, 'tts_model'):
+            model.synthesizer.tts_model.cuda()
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_xtts(text, ref, lang, dev, model)
 
     elif model_name == "voxcpm":
