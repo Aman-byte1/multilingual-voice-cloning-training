@@ -164,7 +164,7 @@ def run_qwen3(text, ref_path, lang, device, model, whisper_model):
     import soundfile as sf
     qwen_lang = QWEN_LANG_MAP[lang]
     
-    # Qwen3-TTS ICL mode requires ref_text.
+    # Use the provided ref_path (which is now the 10s segment)
     ref_text = get_ref_transcript(ref_path, whisper_model, lang)
     
     with torch.inference_mode():
@@ -310,8 +310,14 @@ def main():
         print(f"\n📝 {lang.upper()}: {len(text_lines)} lines × {len(voice_refs)} voices = {total} samples")
 
         with tqdm(total=total, desc=f"{model_name}/{lang}") as pbar:
-            for voice_id, ref_path in voice_refs.items():
-                ref_tuple = get_best_reference(ref_path, duration=10.0)
+            for voice_id, raw_ref_path in voice_refs.items():
+                # Extract and save the best 10s segment to a temporary file
+                # This ensures consistent audio/transcript for all models
+                ref_wav, ref_sr = get_best_reference(raw_ref_path, duration=10.0)
+                temp_ref_path = os.path.join(out_dir, f"temp_ref_{voice_id}.wav")
+                torchaudio.save(temp_ref_path, ref_wav, ref_sr)
+                
+                ref_tuple = (ref_wav, ref_sr)
 
                 for idx, text in enumerate(text_lines):
                     syn_path = os.path.join(out_dir, f"{lang}_{idx:03d}_{voice_id}.wav")
@@ -320,7 +326,8 @@ def main():
                     if not os.path.exists(syn_path):
                         try:
                             t0 = time.perf_counter()
-                            wav_out, sr = gen_fn(text, ref_path, lang, device, ref_tuple)
+                            # Use temp_ref_path for all models now
+                            wav_out, sr = gen_fn(text, temp_ref_path, lang, device, ref_tuple)
                             t1 = time.perf_counter()
                             torchaudio.save(syn_path, wav_out, sr)
                             inf_time = t1 - t0
