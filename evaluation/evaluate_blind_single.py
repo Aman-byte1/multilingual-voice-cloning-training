@@ -332,7 +332,8 @@ def main():
 
     elif model_name == "xtts":
         from TTS.api import TTS
-        model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False).to(device)
+        use_gpu = device == "cuda" or str(device).startswith("cuda")
+        model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=use_gpu)
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_xtts(text, ref, lang, dev, model)
 
     elif model_name == "voxcpm":
