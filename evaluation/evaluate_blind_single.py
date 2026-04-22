@@ -31,17 +31,7 @@ import huggingface_hub
 if not hasattr(huggingface_hub, "is_offline_mode"):
     huggingface_hub.is_offline_mode = lambda: os.environ.get("HF_HUB_OFFLINE", "0") == "1"
 
-# Force speechbrain to use 'token' or 'use_auth_token' correctly
-import speechbrain.utils.fetching as sb_fetch
-original_fetch = sb_fetch.fetch
-def patched_fetch(*args, **kwargs):
-    if "use_auth_token" in kwargs and not hasattr(huggingface_hub, "hf_hub_download"):
-        pass # Handle very old versions if needed
-    if "token" not in kwargs and "use_auth_token" in kwargs:
-        kwargs["token"] = kwargs.pop("use_auth_token")
-    return original_fetch(*args, **kwargs)
-sb_fetch.fetch = patched_fetch
-# ------------------------------------------------------------------------------------------------
+# ------------------------------------
 
 warnings.filterwarnings("ignore")
 torch.set_float32_matmul_precision("high")
