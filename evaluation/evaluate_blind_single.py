@@ -184,7 +184,7 @@ def run_qwen3(text, ref_path, lang, device, model, whisper_model):
 def main():
     parser = argparse.ArgumentParser(description="Blind Test — Single Model Evaluation")
     parser.add_argument("--model", required=True, choices=["omnivoice", "chatterbox", "qwen3", "xtts", "voxcpm"])
-    parser.add_argument("--lang", default="all", help="fr, ar, zh, or all")
+    parser.add_argument("--lang", nargs="+", default=["all"], help="fr, ar, zh, or all")
     parser.add_argument("--text-dir", default="./blind_test/text")
     parser.add_argument("--audio-dir", default="./blind_test/audio")
     parser.add_argument("--output-dir", default="./eval_blind_test")
@@ -194,7 +194,11 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = args.model
-    langs = ["fr", "ar", "zh"] if args.lang == "all" else [args.lang]
+    
+    if args.lang == ["all"]:
+        langs = ["fr", "ar", "zh"]
+    else:
+        langs = args.lang
 
     print("=" * 64)
     print(f"  BLIND TEST — {model_name.upper()}")
