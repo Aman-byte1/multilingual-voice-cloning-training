@@ -20,7 +20,13 @@ def main():
 
     print(f"🎙️ Loading reference audio: {args.ref}")
     try:
-        wav, sr = torchaudio.load(args.ref)
+        try:
+            wav, sr = torchaudio.load(args.ref)
+        except Exception as e:
+            print(f"⚠️ Torchaudio failed, trying librosa... ({e})")
+            import librosa
+            wav_np, sr = librosa.load(args.ref, sr=None)
+            wav = torch.from_numpy(wav_np).unsqueeze(0)
     except Exception as e:
         print(f"❌ Error loading reference audio: {e}")
         return
