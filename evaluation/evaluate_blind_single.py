@@ -13,12 +13,35 @@ Usage:
     python evaluation/evaluate_blind_single.py --model qwen3 --lang fr
 """
 
-import os, sys, gc, csv, json, time, argparse, warnings, glob
-import numpy as np
+import os
+import gc
+import json
+import time
+import argparse
 import torch
-import torch.nn.functional as F
 import torchaudio
+import numpy as np
 from tqdm import tqdm
+import warnings
+import glob
+import torch.nn.functional as F
+
+# --- Monkey Patch HuggingFace Hub (Fixes version conflicts between SpeechBrain and Transformers) ---
+import huggingface_hub
+if not hasattr(huggingface_hub, "is_offline_mode"):
+    huggingface_hub.is_offline_mode = lambda: os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+
+# Force speechbrain to use 'token' or 'use_auth_token' correctly
+import speechbrain.utils.fetching as sb_fetch
+original_fetch = sb_fetch.fetch
+def patched_fetch(*args, **kwargs):
+    if "use_auth_token" in kwargs and not hasattr(huggingface_hub, "hf_hub_download"):
+        pass # Handle very old versions if needed
+    if "token" not in kwargs and "use_auth_token" in kwargs:
+        kwargs["token"] = kwargs.pop("use_auth_token")
+    return original_fetch(*args, **kwargs)
+sb_fetch.fetch = patched_fetch
+# ------------------------------------------------------------------------------------------------
 
 warnings.filterwarnings("ignore")
 torch.set_float32_matmul_precision("high")
