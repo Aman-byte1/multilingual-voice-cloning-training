@@ -91,7 +91,7 @@ def load_speaker_model(device="cuda"):
 
 def extract_speaker_embedding(wav_path, model, device="cuda"):
     try:
-        wav, sr = torchaudio.load(wav_path)
+        wav, sr = safe_load_audio(wav_path)
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
         if wav.shape[0] > 1:
@@ -115,8 +115,23 @@ def find_ref_audio(audio_dir, voice_id):
     matches = glob.glob(os.path.join(audio_dir, f"*{voice_id}*.wav"))
     return matches[0] if matches else None
 
+def safe_load_audio(path):
+    """Fallback loader to bypass broken torchaudio/torchcodec versions."""
+    import soundfile as sf
+    try:
+        # Try standard torchaudio first
+        return torchaudio.load(path)
+    except Exception:
+        # Fallback to soundfile + torch conversion
+        data, sr = sf.read(path)
+        if len(data.shape) == 1:
+            data = data[np.newaxis, :]
+        else:
+            data = data.T # (T, C) -> (C, T)
+        return torch.from_numpy(data).float(), sr
+
 def get_best_reference(ref_path, duration=10.0):
-    waveform, sr = torchaudio.load(str(ref_path))
+    waveform, sr = safe_load_audio(str(ref_path))
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
     window_size = int(sr * 0.05)
