@@ -247,6 +247,9 @@ def main():
     elif model_name == "voxcpm":
         from voxcpm import VoxCPM
         model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False, device=device)
+        # Force the internal model to the device if it stuck on CPU
+        if hasattr(model, 'tts_model'):
+            model.tts_model.to(device)
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_voxcpm(text, ref, lang, dev, model)
 
     elif model_name == "qwen3":
