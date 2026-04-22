@@ -144,14 +144,42 @@ def run_voxcpm(text, ref_path, lang, device, model):
         wav_t = wav_t.unsqueeze(0)
     return wav_t, sr
 
-def run_qwen3(text, ref_path, lang, device, model):
+# Cache for reference transcripts to avoid re-transcribing same voice
+REF_TRANSCRIPT_CACHE = {}
+
+def get_ref_transcript(ref_path, whisper_model, lang):
+    if ref_path in REF_TRANSCRIPT_CACHE:
+        return REF_TRANSCRIPT_CACHE[ref_path]
+    
+    print(f"   (Transcribing reference: {os.path.basename(ref_path)})")
+    try:
+        segments, _ = whisper_model.transcribe(ref_path, language=lang)
+        text = " ".join(s.text for s in segments).strip()
+        REF_TRANSCRIPT_CACHE[ref_path] = text
+        return text
+    except Exception:
+        return "This is a recording of a person speaking."
+
+def run_qwen3(text, ref_path, lang, device, model, whisper_model):
     import soundfile as sf
     qwen_lang = QWEN_LANG_MAP[lang]
+    
+    # Qwen3-TTS ICL mode requires ref_text.
+    ref_text = get_ref_transcript(ref_path, whisper_model, lang)
+    
     with torch.inference_mode():
         if hasattr(model, 'generate_voice_clone'):
-            wavs, sr = model.generate_voice_clone(
-                text=text, language=qwen_lang, ref_audio=ref_path, ref_text="",
-            )
+            # Try with transcribed text
+            try:
+                wavs, sr = model.generate_voice_clone(
+                    text=text, language=qwen_lang, ref_audio=ref_path, ref_text=ref_text,
+                )
+            except Exception:
+                # Fallback to x_vector mode if available
+                wavs, sr = model.generate_voice_clone(
+                    text=text, language=qwen_lang, ref_audio=ref_path, x_vector_only_mode=True,
+                )
+            
             wav_np = wavs[0] if isinstance(wavs, list) else wavs
             if isinstance(wav_np, torch.Tensor):
                 wav_np = wav_np.cpu().numpy()
@@ -250,7 +278,7 @@ def main():
             "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
             device_map=device, dtype=torch.float32, attn_implementation=attn,
         )
-        gen_fn = lambda text, ref, lang, dev, ref_tuple: run_qwen3(text, ref, lang, dev, model)
+        gen_fn = lambda text, ref, lang, dev, ref_tuple: run_qwen3(text, ref, lang, dev, model, whisper)
 
     print(f"  ✅ {model_name} loaded")
 
