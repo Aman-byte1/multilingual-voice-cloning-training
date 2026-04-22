@@ -43,12 +43,12 @@ def main():
     audio_data = res[0] if isinstance(res, tuple) else res
     
     # Ensure audio data is in the right format for saving
-    if isinstance(audio_data, (list, tuple)):
-        audio_tensor = torch.from_numpy(audio_data)
-    elif not isinstance(audio_data, torch.Tensor):
-        audio_tensor = torch.from_numpy(audio_data)
-    else:
+    if isinstance(audio_data, torch.Tensor):
         audio_tensor = audio_data
+    else:
+        # Convert list or numpy array to tensor
+        import numpy as np
+        audio_tensor = torch.from_numpy(np.array(audio_data))
         
     if audio_tensor.ndim == 1:
         audio_tensor = audio_tensor.unsqueeze(0)
