@@ -309,15 +309,19 @@ def main():
         print("❌ No voice references found.")
         sys.exit(1)
 
-    # Load shared eval tools
-    print(f"\n🔎 Loading Whisper {args.whisper_model} + ECAPA-TDNN...")
-    from faster_whisper import WhisperModel
-    whisper = WhisperModel(args.whisper_model, device=device,
-                           compute_type="float16" if device == "cuda" else "int8")
-    verifier = load_speaker_model(device=device)
-
-    # Load model
+    # ════════════════════════════════════════════════════════════
+    # PHASE 1: Generate all audio (only TTS model loaded)
+    # ════════════════════════════════════════════════════════════
     print(f"\n🔧 Loading {model_name}...")
+
+    # We need whisper for qwen3 only (it uses it internally)
+    whisper = None
+    if model_name == "qwen3":
+        print(f"\n🔎 Loading Whisper {args.whisper_model} (required by Qwen3)...")
+        from faster_whisper import WhisperModel
+        whisper = WhisperModel(args.whisper_model, device=device,
+                               compute_type="float16" if device == "cuda" else "int8")
+
     if model_name == "chatterbox":
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
         torch.backends.cudnn.enabled = False
@@ -334,7 +338,6 @@ def main():
         from TTS.api import TTS
         use_gpu = device == "cuda" or str(device).startswith("cuda")
         model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=use_gpu)
-        # Explicitly move synthesizer model to GPU if available
         if use_gpu and hasattr(model, 'synthesizer') and hasattr(model.synthesizer, 'tts_model'):
             model.synthesizer.tts_model.cuda()
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_xtts(text, ref, lang, dev, model)
@@ -342,7 +345,6 @@ def main():
     elif model_name == "voxcpm":
         from voxcpm import VoxCPM
         model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False, device=device)
-        # Force the internal model to the device if it stuck on CPU
         if hasattr(model, 'tts_model'):
             model.tts_model.to(device)
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_voxcpm(text, ref, lang, dev, model)
@@ -350,7 +352,7 @@ def main():
     elif model_name == "qwen3":
         from qwen_tts import Qwen3TTSModel
         try:
-            import flash_attn
+            from transformers import BitsAndBytesConfig
             attn = "flash_attention_2"
         except ImportError:
             attn = "sdpa"
@@ -362,9 +364,8 @@ def main():
 
     print(f"  ✅ {model_name} loaded")
 
-    # Text normalization
-    import jiwer
-    all_results = []
+    # --- Generate all audio files ---
+    generated_files = {}  # {lang: {(voice_id, idx): syn_path}}
 
     for lang in langs:
         if lang not in MODEL_LANG_SUPPORT.get(model_name, []):
@@ -378,88 +379,120 @@ def main():
         with open(text_file, "r", encoding="utf-8") as f:
             text_lines = [l.strip() for l in f if l.strip()]
 
-        if lang in ("zh", "ar", "ja", "ko"):
-            wer_transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
-        else:
-            wer_transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip(), jiwer.RemovePunctuation()])
-
         out_dir = os.path.join(args.output_dir, model_name, lang)
         os.makedirs(out_dir, exist_ok=True)
 
         total = len(text_lines) * len(voice_refs)
         print(f"\n📝 {lang.upper()}: {len(text_lines)} lines × {len(voice_refs)} voices = {total} samples")
 
-        with tqdm(total=total, desc=f"{model_name}/{lang}") as pbar:
+        generated_files[lang] = {}
+
+        with tqdm(total=total, desc=f"{model_name}/{lang} [GEN]") as pbar:
             for voice_id, raw_ref_path in voice_refs.items():
-                # Extract and save the best 10s segment to a temporary file
-                # This ensures consistent audio/transcript for all models
                 ref_wav, ref_sr = get_best_reference(raw_ref_path, duration=10.0)
                 temp_ref_path = os.path.join(out_dir, f"temp_ref_{voice_id}.wav")
                 safe_save_audio(temp_ref_path, ref_wav, ref_sr)
-                
                 ref_tuple = (ref_wav, ref_sr)
 
                 for idx, text in enumerate(text_lines):
                     syn_path = os.path.join(out_dir, f"{lang}_{idx:03d}_{voice_id}.wav")
+                    generated_files[lang][(voice_id, idx)] = (syn_path, text, temp_ref_path)
 
-                    # Generate (resume-friendly)
                     if not os.path.exists(syn_path):
                         try:
-                            t0 = time.perf_counter()
-                            # Use temp_ref_path for all models now
                             wav_out, sr = gen_fn(text, temp_ref_path, lang, device, ref_tuple)
-                            t1 = time.perf_counter()
                             safe_save_audio(syn_path, wav_out, sr)
-                            inf_time = t1 - t0
                         except Exception as e:
                             tqdm.write(f"   ⚠ {voice_id}/line{idx}: {e}")
-                            pbar.update(1)
-                            continue
-                    else:
-                        inf_time = 0.0
-
-                    # ASR
-                    try:
-                        segs, _ = whisper.transcribe(syn_path, language=lang, beam_size=5, vad_filter=True)
-                        hyp = " ".join(s.text for s in segs).strip()
-                    except Exception:
-                        hyp = ""
-
-                    # WER/CER
-                    try:
-                        if hyp.strip():
-                            ref_clean = wer_transforms(text)
-                            hyp_clean = wer_transforms(hyp)
-                            wer = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
-                            cer = float(jiwer.cer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
-                        else:
-                            wer = cer = 1.0
-                    except Exception:
-                        wer = cer = 1.0
-
-                    # Speaker Similarity
-                    syn_emb = extract_speaker_embedding(syn_path, verifier, device)
-                    ref_emb = extract_speaker_embedding(temp_ref_path, verifier, device)
-                    if syn_emb is not None and ref_emb is not None:
-                        sim = float(F.cosine_similarity(syn_emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
-                    else:
-                        sim = None
-
-                    all_results.append({
-                        "model": model_name, "lang": lang, "voice_id": voice_id,
-                        "voice_desc": VOICE_META.get(voice_id, ""),
-                        "text_idx": idx, "WER": wer, "CER": cer,
-                        "Similarity": sim, "InferenceS": inf_time,
-                    })
                     pbar.update(1)
 
                     if idx % 20 == 0:
                         gc.collect()
                         torch.cuda.empty_cache()
 
-                # Clear cache between voices
                 gc.collect()
                 torch.cuda.empty_cache()
+
+    # ════════════════════════════════════════════════════════════
+    # PHASE 2: Unload TTS model, load eval tools, score everything
+    # ════════════════════════════════════════════════════════════
+    print(f"\n🗑️  Unloading {model_name} to free VRAM...")
+    del model
+    if model_name != "qwen3" and whisper is not None:
+        del whisper
+        whisper = None
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print(f"\n🔎 Loading Whisper {args.whisper_model} + ECAPA-TDNN for evaluation...")
+    from faster_whisper import WhisperModel
+    whisper = WhisperModel(args.whisper_model, device=device,
+                           compute_type="float16" if device == "cuda" else "int8")
+    verifier = load_speaker_model(device=device)
+
+    import jiwer
+    all_results = []
+
+    for lang in langs:
+        if lang not in generated_files:
+            continue
+
+        text_file = os.path.join(args.text_dir, LANG_TEXT_MAP.get(lang, f"{lang}.txt"))
+        with open(text_file, "r", encoding="utf-8") as f:
+            text_lines = [l.strip() for l in f if l.strip()]
+
+        if lang in ("zh", "ar", "ja", "ko"):
+            wer_transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
+        else:
+            wer_transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip(), jiwer.RemovePunctuation()])
+
+        out_dir = os.path.join(args.output_dir, model_name, lang)
+        total = len(generated_files[lang])
+        print(f"\n📊 Evaluating {lang.upper()}: {total} samples")
+
+        with tqdm(total=total, desc=f"{model_name}/{lang} [EVAL]") as pbar:
+            for (voice_id, idx), (syn_path, text, temp_ref_path) in generated_files[lang].items():
+                # ASR
+                try:
+                    if os.path.exists(syn_path):
+                        segs, _ = whisper.transcribe(syn_path, language=lang, beam_size=5, vad_filter=True)
+                        hyp = " ".join(s.text for s in segs).strip()
+                    else:
+                        hyp = ""
+                except Exception:
+                    hyp = ""
+
+                # WER/CER
+                try:
+                    if hyp.strip():
+                        ref_clean = wer_transforms(text)
+                        hyp_clean = wer_transforms(hyp)
+                        wer = float(jiwer.wer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
+                        cer = float(jiwer.cer(ref_clean, hyp_clean)) if ref_clean.strip() else 1.0
+                    else:
+                        wer = cer = 1.0
+                except Exception:
+                    wer = cer = 1.0
+
+                # Speaker Similarity
+                syn_emb = extract_speaker_embedding(syn_path, verifier, device)
+                ref_emb = extract_speaker_embedding(temp_ref_path, verifier, device)
+                if syn_emb is not None and ref_emb is not None:
+                    sim = float(F.cosine_similarity(syn_emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
+                else:
+                    sim = None
+
+                all_results.append({
+                    "model": model_name, "lang": lang, "voice_id": voice_id,
+                    "voice_desc": VOICE_META.get(voice_id, ""),
+                    "text_idx": idx, "WER": wer, "CER": cer,
+                    "Similarity": sim, "InferenceS": 0.0,
+                })
+                pbar.update(1)
+
+                if idx % 20 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
         # Per-language summary
         lang_results = [r for r in all_results if r["lang"] == lang]
@@ -469,7 +502,6 @@ def main():
                 "WER": safe_mean([r["WER"] for r in lang_results]),
                 "CER": safe_mean([r["CER"] for r in lang_results]),
                 "Similarity": safe_mean([r["Similarity"] for r in lang_results]),
-                "InferenceS": safe_mean([r["InferenceS"] for r in lang_results]),
             }
             with open(os.path.join(out_dir, "summary.json"), "w") as f:
                 json.dump(summary, f, indent=2)
@@ -486,7 +518,6 @@ def main():
         print(f"\n✅ Results saved → {master_csv}")
 
     # Cleanup
-    del model
     gc.collect()
     torch.cuda.empty_cache()
 
