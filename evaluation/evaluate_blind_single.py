@@ -337,7 +337,7 @@ def main():
 
                     # Speaker Similarity
                     syn_emb = extract_speaker_embedding(syn_path, verifier, device)
-                    ref_emb = extract_speaker_embedding(ref_path, verifier, device)
+                    ref_emb = extract_speaker_embedding(temp_ref_path, verifier, device)
                     if syn_emb is not None and ref_emb is not None:
                         sim = float(F.cosine_similarity(syn_emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
                     else:
