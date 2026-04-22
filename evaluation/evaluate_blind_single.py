@@ -355,6 +355,10 @@ def main():
                         gc.collect()
                         torch.cuda.empty_cache()
 
+                # Clear cache between voices
+                gc.collect()
+                torch.cuda.empty_cache()
+
         # Per-language summary
         lang_results = [r for r in all_results if r["lang"] == lang]
         if lang_results:
