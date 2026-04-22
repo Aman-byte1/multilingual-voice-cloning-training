@@ -243,6 +243,7 @@ def main():
     elif model_name == "voxcpm":
         from voxcpm import VoxCPM
         model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+        model.to(device)
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_voxcpm(text, ref, lang, dev, model)
 
     elif model_name == "qwen3":
