@@ -20,10 +20,37 @@ import time
 import argparse
 import torch
 import torchaudio
-try:
-    torchaudio.set_audio_backend("soundfile")
-except:
-    pass # Older versions might not have this method or might not need it
+# Monkey-patch torchaudio to bypass torchcodec globally
+_orig_ta_load = torchaudio.load
+_orig_ta_save = torchaudio.save
+
+def _patched_ta_load(filepath, *args, **kwargs):
+    try:
+        return _orig_ta_load(filepath, *args, **kwargs)
+    except Exception:
+        import soundfile as sf
+        data, sr = sf.read(filepath)
+        if len(data.shape) == 1:
+            data = data[np.newaxis, :]
+        else:
+            data = data.T
+        return torch.from_numpy(data).float(), sr
+
+def _patched_ta_save(filepath, src, sample_rate, *args, **kwargs):
+    try:
+        return _orig_ta_save(filepath, src, sample_rate, *args, **kwargs)
+    except Exception:
+        import soundfile as sf
+        if isinstance(src, torch.Tensor):
+            data = src.detach().cpu().numpy()
+        else:
+            data = src
+        if len(data.shape) == 2:
+            data = data.T
+        sf.write(filepath, data, sample_rate)
+
+torchaudio.load = _patched_ta_load
+torchaudio.save = _patched_ta_save
 import numpy as np
 from tqdm import tqdm
 import warnings
