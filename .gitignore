@@ -1,0 +1,13 @@
+paper/
+papers/
+*.wav
+__pycache__/
+.ipynb_checkpoints/
+exp/
+data/
+OmniVoice/
+temp_submission/
+eval_base_*/
+eval_results_*/
+checkpoint-*/
+checkpoint_*
