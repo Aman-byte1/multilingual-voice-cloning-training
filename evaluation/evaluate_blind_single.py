@@ -147,38 +147,16 @@ def run_voxcpm(text, ref_path, lang, device, model):
 # Cache for reference transcripts to avoid re-transcribing same voice
 REF_TRANSCRIPT_CACHE = {}
 
-def get_ref_transcript(ref_path, whisper_model, lang):
-    if ref_path in REF_TRANSCRIPT_CACHE:
-        return REF_TRANSCRIPT_CACHE[ref_path]
-    
-    print(f"   (Transcribing reference: {os.path.basename(ref_path)})")
-    try:
-        segments, _ = whisper_model.transcribe(ref_path, language=lang)
-        text = " ".join(s.text for s in segments).strip()
-        REF_TRANSCRIPT_CACHE[ref_path] = text
-        return text
-    except Exception:
-        return "This is a recording of a person speaking."
-
 def run_qwen3(text, ref_path, lang, device, model, whisper_model):
     import soundfile as sf
     qwen_lang = QWEN_LANG_MAP[lang]
     
-    # Use the provided ref_path (which is now the 10s segment)
-    ref_text = get_ref_transcript(ref_path, whisper_model, lang)
-    
     with torch.inference_mode():
         if hasattr(model, 'generate_voice_clone'):
-            # Try with transcribed text
-            try:
-                wavs, sr = model.generate_voice_clone(
-                    text=text, language=qwen_lang, ref_audio=ref_path, ref_text=ref_text,
-                )
-            except Exception:
-                # Fallback to x_vector mode if available
-                wavs, sr = model.generate_voice_clone(
-                    text=text, language=qwen_lang, ref_audio=ref_path, x_vector_only_mode=True,
-                )
+            # Use x_vector mode to avoid needing ref_text (pure audio-based cloning)
+            wavs, sr = model.generate_voice_clone(
+                text=text, language=qwen_lang, ref_audio=ref_path, x_vector_only_mode=True,
+            )
             
             wav_np = wavs[0] if isinstance(wavs, list) else wavs
             if isinstance(wav_np, torch.Tensor):
