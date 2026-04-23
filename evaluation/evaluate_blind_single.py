@@ -303,11 +303,13 @@ def main():
         import re
         for wav_file in sorted(glob.glob(os.path.join(args.audio_dir, "*.wav"))):
             basename = os.path.basename(wav_file)
-            # Extract voice ID from filename patterns like "2023.acl-long.193.wav" or "speaker_193.wav"
-            match = re.search(r'(\d+)', basename)
-            if match:
-                vid = match.group(1)
-                voice_refs[vid] = wav_file
+            # Extract voice ID: last number segment before .wav
+            # e.g., "2023.acl-long.810.wav" → "810"
+            numbers = re.findall(r'(\d+)', basename)
+            if numbers:
+                vid = numbers[-1]  # Take the LAST number as voice ID
+                if vid not in voice_refs:
+                    voice_refs[vid] = wav_file
         print(f"  🔍 Auto-discovered {len(voice_refs)} speakers from {args.audio_dir}")
         for vid, ref in voice_refs.items():
             print(f"  ✓ Voice {vid} ({VOICE_META.get(vid, '?')}): {ref}")
