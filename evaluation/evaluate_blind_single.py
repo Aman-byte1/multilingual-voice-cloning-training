@@ -97,6 +97,7 @@ LANG_TEXT_MAP = {"zh": "chinese.txt", "ar": "arabic.txt", "fr": "french.txt"}
 
 MODEL_LANG_SUPPORT = {
     "omnivoice":  ["fr", "ar", "zh"],
+    "omnivoice_finetuned":  ["fr", "ar", "zh"],
     "chatterbox": ["fr", "ar", "zh"],
     "qwen3":      ["fr", "zh"],
     "xtts":       ["fr", "ar", "zh"],
@@ -275,7 +276,7 @@ def run_qwen3(text, ref_path, lang, device, model, whisper_model):
 
 def main():
     parser = argparse.ArgumentParser(description="Blind Test — Single Model Evaluation")
-    parser.add_argument("--model", required=True, choices=["omnivoice", "chatterbox", "qwen3", "xtts", "voxcpm"])
+    parser.add_argument("--model", required=True, choices=["omnivoice", "omnivoice_finetuned", "chatterbox", "qwen3", "xtts", "voxcpm"])
     parser.add_argument("--lang", nargs="+", default=["all"], help="fr, ar, zh, or all")
     parser.add_argument("--text-dir", default="./blind_test/text")
     parser.add_argument("--audio-dir", default="./blind_test/audio")
@@ -352,7 +353,7 @@ def main():
                     print(f"  📍 Moved {attr_name} → cuda")
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_chatterbox(text, ref, lang, dev, model)
 
-    elif model_name == "omnivoice":
+    elif model_name in ["omnivoice", "omnivoice_finetuned"]:
         from omnivoice import OmniVoice
         model = None
         gen_fn = None
@@ -400,7 +401,7 @@ def main():
             print(f"\n⏭ {model_name} does not support {lang}, skipping.")
             continue
 
-        if model_name == "omnivoice":
+        if model_name in ["omnivoice", "omnivoice_finetuned"]:
             from huggingface_hub import hf_hub_download
             from safetensors.torch import load_file
             print(f"\n🧩 Loading OmniVoice base model and LoRA for {lang.upper()}...")
@@ -412,44 +413,47 @@ def main():
                 
             model = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
             
-            # Map languages to LoRA repo
-            BEST_MODELS = {
-                "zh": "amanuelbyte/omnivoice-lora-zh-400",
-                "ar": "amanuelbyte/omnivoice-lora-ar-400",
-                "fr": "amanuelbyte/omnivoice-lora-fr-200",
-            }
-            repo_id = BEST_MODELS.get(lang)
-            if repo_id:
-                print(f"  📥 Merging LoRA weights from {repo_id}...")
-                try:
-                    weights_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")
-                    sd = load_file(weights_path)
-                    merged_sd = {}
-                    processed_bases = set()
-                    scaling = 64 / 32
-                    for k in sd.keys():
-                        if ".base_layer.weight" in k:
-                            base_key = k.replace("llm.base_model.model.", "llm.")
-                            clean_key = base_key.replace(".base_layer", "")
-                            la_key = k.replace(".base_layer.weight", ".lora_A.default.weight")
-                            lb_key = k.replace(".base_layer.weight", ".lora_B.default.weight")
-                            if la_key in sd and lb_key in sd:
-                                A = sd[la_key].to(torch.float32)
-                                B = sd[lb_key].to(torch.float32)
-                                base = sd[k].to(torch.float32)
-                                merged = base + (B @ A) * scaling
-                                merged_sd[clean_key] = merged.to(sd[k].dtype)
-                                processed_bases.add(k)
-                                processed_bases.add(la_key)
-                                processed_bases.add(lb_key)
-                    for k in sd.keys():
-                        if k not in processed_bases:
-                            clean_key = k.replace("llm.base_model.model.", "llm.")
-                            merged_sd[clean_key] = sd[k]
-                    model.load_state_dict(merged_sd, strict=False)
-                    print("  ✅ LoRA Merge successful.")
-                except Exception as e:
-                    print(f"  ❌ Failed to merge LoRA: {e}")
+            if model_name == "omnivoice_finetuned":
+                # Map languages to LoRA repo (using step 400 for all)
+                BEST_MODELS = {
+                    "zh": "amanuelbyte/omnivoice-lora-zh-400",
+                    "ar": "amanuelbyte/omnivoice-lora-ar-400",
+                    "fr": "amanuelbyte/omnivoice-lora-fr-400",
+                }
+                repo_id = BEST_MODELS.get(lang)
+                if repo_id:
+                    print(f"  📥 Merging LoRA weights from {repo_id}...")
+                    try:
+                        weights_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")
+                        sd = load_file(weights_path)
+                        merged_sd = {}
+                        processed_bases = set()
+                        scaling = 64 / 32
+                        for k in sd.keys():
+                            if ".base_layer.weight" in k:
+                                base_key = k.replace("llm.base_model.model.", "llm.")
+                                clean_key = base_key.replace(".base_layer", "")
+                                la_key = k.replace(".base_layer.weight", ".lora_A.default.weight")
+                                lb_key = k.replace(".base_layer.weight", ".lora_B.default.weight")
+                                if la_key in sd and lb_key in sd:
+                                    A = sd[la_key].to(torch.float32)
+                                    B = sd[lb_key].to(torch.float32)
+                                    base = sd[k].to(torch.float32)
+                                    merged = base + (B @ A) * scaling
+                                    merged_sd[clean_key] = merged.to(sd[k].dtype)
+                                    processed_bases.add(k)
+                                    processed_bases.add(la_key)
+                                    processed_bases.add(lb_key)
+                        for k in sd.keys():
+                            if k not in processed_bases:
+                                clean_key = k.replace("llm.base_model.model.", "llm.")
+                                merged_sd[clean_key] = sd[k]
+                        model.load_state_dict(merged_sd, strict=False)
+                        print("  ✅ LoRA Merge successful.")
+                    except Exception as e:
+                        print(f"  ❌ Failed to merge LoRA: {e}")
+            else:
+                print(f"  📥 Using Base OmniVoice (no LoRA)...")
             
             model.to(device).eval()
             gen_fn = lambda text, ref, l, dev, ref_tuple, m=model: run_omnivoice(text, ref, l, dev, m, ref_tuple)
