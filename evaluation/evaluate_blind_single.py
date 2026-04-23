@@ -298,13 +298,27 @@ def main():
 
     # Resolve voice refs
     voice_refs = {}
-    for vid in args.voices:
-        ref = find_ref_audio(args.audio_dir, vid)
-        if ref:
-            voice_refs[vid] = ref
+    if args.voices == ["all"]:
+        # Auto-discover all speakers from audio directory
+        import re
+        for wav_file in sorted(glob.glob(os.path.join(args.audio_dir, "*.wav"))):
+            basename = os.path.basename(wav_file)
+            # Extract voice ID from filename patterns like "2023.acl-long.193.wav" or "speaker_193.wav"
+            match = re.search(r'(\d+)', basename)
+            if match:
+                vid = match.group(1)
+                voice_refs[vid] = wav_file
+        print(f"  🔍 Auto-discovered {len(voice_refs)} speakers from {args.audio_dir}")
+        for vid, ref in voice_refs.items():
             print(f"  ✓ Voice {vid} ({VOICE_META.get(vid, '?')}): {ref}")
-        else:
-            print(f"  ✗ Voice {vid}: NOT FOUND")
+    else:
+        for vid in args.voices:
+            ref = find_ref_audio(args.audio_dir, vid)
+            if ref:
+                voice_refs[vid] = ref
+                print(f"  ✓ Voice {vid} ({VOICE_META.get(vid, '?')}): {ref}")
+            else:
+                print(f"  ✗ Voice {vid}: NOT FOUND")
     if not voice_refs:
         print("❌ No voice references found.")
         sys.exit(1)
