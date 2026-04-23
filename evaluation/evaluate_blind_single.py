@@ -351,9 +351,14 @@ def main():
 
     elif model_name == "voxcpm":
         from voxcpm import VoxCPM
-        model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False, device=device)
-        if hasattr(model, 'tts_model'):
-            model.tts_model.to(device)
+        model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+        # Move all internal nn.Module subcomponents to GPU
+        if device == "cuda":
+            for attr_name in dir(model):
+                attr = getattr(model, attr_name, None)
+                if isinstance(attr, torch.nn.Module):
+                    attr.to("cuda")
+                    print(f"  📍 Moved {attr_name} → cuda")
         gen_fn = lambda text, ref, lang, dev, ref_tuple: run_voxcpm(text, ref, lang, dev, model)
 
     elif model_name == "qwen3":
