@@ -26,8 +26,88 @@ import json
 import time
 import argparse
 import warnings
-import numpy as np
+
+# ── Fix torch.library.infer_schema incompatibility ─────────────
+# PyTorch 2.6+ torch.library.custom_op fails when dependencies use
+# `from __future__ import annotations`, which turns type hints into
+# strings ('torch.Tensor' instead of torch.Tensor). We monkey-patch
+# infer_schema to resolve string annotations before validation.
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+
 import torch
+
+def _patch_infer_schema():
+    """Patch torch.library.infer_schema to handle string type annotations."""
+    try:
+        import torch._library.infer_schema as _is
+        _orig_infer = _is.infer_schema
+        
+        def _patched_infer_schema(prototype_function, *, mutates_args, op_name=None):
+            """Resolve string annotations before passing to original infer_schema."""
+            import inspect, typing
+            sig = inspect.signature(prototype_function)
+            
+            # Build a mapping of string -> actual type for common torch types
+            type_map = {
+                'torch.Tensor': torch.Tensor,
+                'Tensor': torch.Tensor,
+                'torch.dtype': torch.dtype,
+                'torch.device': torch.device,
+            }
+            # Add Optional, List, Sequence variants
+            for name, typ in list(type_map.items()):
+                type_map[f'Optional[{name}]'] = typing.Optional[typ]
+            
+            # Check if any params have string annotations
+            needs_fix = False
+            for p in sig.parameters.values():
+                if isinstance(p.annotation, str):
+                    needs_fix = True
+                    break
+            if isinstance(sig.return_annotation, str):
+                needs_fix = True
+                    
+            if needs_fix:
+                # Resolve string annotations
+                new_params = []
+                for p in sig.parameters.values():
+                    if isinstance(p.annotation, str) and p.annotation in type_map:
+                        p = p.replace(annotation=type_map[p.annotation])
+                    new_params.append(p)
+                
+                ret = sig.return_annotation
+                if isinstance(ret, str) and ret in type_map:
+                    ret = type_map[ret]
+                
+                new_sig = sig.replace(parameters=new_params, return_annotation=ret)
+                prototype_function.__signature__ = new_sig
+                
+                # Also fix __annotations__ dict
+                import types as _types
+                if hasattr(prototype_function, '__annotations__'):
+                    new_annots = {}
+                    for k, v in prototype_function.__annotations__.items():
+                        if isinstance(v, str) and v in type_map:
+                            new_annots[k] = type_map[v]
+                        else:
+                            new_annots[k] = v
+                    prototype_function.__annotations__ = new_annots
+            
+            return _orig_infer(prototype_function, mutates_args=mutates_args, op_name=op_name)
+        
+        _is.infer_schema = _patched_infer_schema
+        
+        # Also patch the public API entry point
+        if hasattr(torch.library, 'infer_schema'):
+            torch.library.infer_schema = _patched_infer_schema
+            
+    except Exception:
+        pass
+
+_patch_infer_schema()
+
+import numpy as np
 import torch.nn.functional as F
 import torchaudio
 import soundfile as sf
@@ -37,9 +117,7 @@ from datasets import load_dataset
 from huggingface_hub import login
 
 import logging
-# Silence torchcodec spam
 logging.getLogger("torchcodec").setLevel(logging.CRITICAL)
-os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
 
 sys.path.insert(0, os.path.dirname(__file__))
 torch.set_float32_matmul_precision("high")
