@@ -195,7 +195,10 @@ def generate_omnivoice(model, text, ref_audio_tuple):
     """ref_audio_tuple = (waveform_tensor, sample_rate)"""
     with torch.inference_mode():
         audio = model.generate(text=text, ref_audio=ref_audio_tuple)
-    return audio[0].cpu().numpy().squeeze(), 24000
+    out = audio[0]
+    if hasattr(out, 'cpu'):
+        out = out.cpu().numpy()
+    return np.asarray(out, dtype=np.float32).squeeze(), 24000
 
 
 def generate_voxcpm(model, text, ref_path):
