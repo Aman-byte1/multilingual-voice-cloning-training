@@ -42,68 +42,64 @@ def _patch_infer_schema():
     try:
         import torch._library.infer_schema as _is
         _orig_infer = _is.infer_schema
-        
-        def _patched_infer_schema(prototype_function, *, mutates_args, op_name=None):
-            """Resolve string annotations before passing to original infer_schema."""
+
+        def _fix_annotations(fn):
+            """Resolve string type annotations on a function in-place."""
             import inspect, typing
-            sig = inspect.signature(prototype_function)
-            
-            # Build a mapping of string -> actual type for common torch types
             type_map = {
                 'torch.Tensor': torch.Tensor,
                 'Tensor': torch.Tensor,
                 'torch.dtype': torch.dtype,
                 'torch.device': torch.device,
             }
-            # Add Optional, List, Sequence variants
             for name, typ in list(type_map.items()):
                 type_map[f'Optional[{name}]'] = typing.Optional[typ]
-            
-            # Check if any params have string annotations
-            needs_fix = False
-            for p in sig.parameters.values():
-                if isinstance(p.annotation, str):
-                    needs_fix = True
-                    break
-            if isinstance(sig.return_annotation, str):
-                needs_fix = True
-                    
-            if needs_fix:
-                # Resolve string annotations
-                new_params = []
-                for p in sig.parameters.values():
-                    if isinstance(p.annotation, str) and p.annotation in type_map:
-                        p = p.replace(annotation=type_map[p.annotation])
-                    new_params.append(p)
-                
-                ret = sig.return_annotation
-                if isinstance(ret, str) and ret in type_map:
-                    ret = type_map[ret]
-                
-                new_sig = sig.replace(parameters=new_params, return_annotation=ret)
-                prototype_function.__signature__ = new_sig
-                
-                # Also fix __annotations__ dict
-                import types as _types
-                if hasattr(prototype_function, '__annotations__'):
-                    new_annots = {}
-                    for k, v in prototype_function.__annotations__.items():
-                        if isinstance(v, str) and v in type_map:
-                            new_annots[k] = type_map[v]
-                        else:
-                            new_annots[k] = v
-                    prototype_function.__annotations__ = new_annots
-            
-            return _orig_infer(prototype_function, mutates_args=mutates_args, op_name=op_name)
-        
+
+            if not callable(fn):
+                return fn
+
+            # Fix __annotations__ dict directly
+            annots = getattr(fn, '__annotations__', {})
+            changed = False
+            for k, v in list(annots.items()):
+                if isinstance(v, str) and v in type_map:
+                    annots[k] = type_map[v]
+                    changed = True
+
+            if changed:
+                fn.__annotations__ = annots
+                # Also rebuild __signature__ if it exists
+                try:
+                    sig = inspect.signature(fn)
+                    new_params = []
+                    for p in sig.parameters.values():
+                        if isinstance(p.annotation, str) and p.annotation in type_map:
+                            p = p.replace(annotation=type_map[p.annotation])
+                        new_params.append(p)
+                    ret = sig.return_annotation
+                    if isinstance(ret, str) and ret in type_map:
+                        ret = type_map[ret]
+                    fn.__signature__ = sig.replace(parameters=new_params, return_annotation=ret)
+                except (ValueError, TypeError):
+                    pass
+            return fn
+
+        def _patched_infer_schema(*args, **kwargs):
+            """Resolve string annotations before passing to original."""
+            # The first positional arg is the prototype function
+            if args and callable(args[0]):
+                args = (_fix_annotations(args[0]),) + args[1:]
+            return _orig_infer(*args, **kwargs)
+
         _is.infer_schema = _patched_infer_schema
-        
+
         # Also patch the public API entry point
         if hasattr(torch.library, 'infer_schema'):
             torch.library.infer_schema = _patched_infer_schema
-            
+
     except Exception:
         pass
+
 
 _patch_infer_schema()
 
