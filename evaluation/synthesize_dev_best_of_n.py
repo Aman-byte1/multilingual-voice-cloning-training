@@ -191,9 +191,10 @@ def compute_cer(ref_text, hyp_text, lang):
 # Model loaders and generators
 # ===================================================================
 
-def generate_omnivoice(model, text, ref_path):
+def generate_omnivoice(model, text, ref_audio_tuple):
+    """ref_audio_tuple = (waveform_tensor, sample_rate)"""
     with torch.inference_mode():
-        audio = model.generate(text=text, ref_audio=ref_path)
+        audio = model.generate(text=text, ref_audio=ref_audio_tuple)
     return audio[0].cpu().numpy().squeeze(), 24000
 
 
@@ -379,7 +380,7 @@ def main():
                 # Monkey-patch load_audio to use torchaudio instead of torchcodec
                 import omnivoice.utils.audio as _omni_audio
                 def _load_audio_torchaudio(audio_path: str, sampling_rate: int):
-                    waveform, sr = torchaudio.load(audio_path, backend="soundfile")
+                    waveform, sr = torchaudio.load(audio_path)
                     if sr != sampling_rate:
                         waveform = torchaudio.functional.resample(waveform, sr, sampling_rate)
                     if waveform.shape[0] > 1:
@@ -401,7 +402,12 @@ def main():
                         all_outputs[model_name][entry["idx"]] = syn_path
                         continue
                     try:
-                        wav, sr = generate_omnivoice(model, entry["text_target"], entry["ref_path"])
+                        # Load ref audio as (tensor, sr) tuple to bypass internal loading
+                        ref_wav, ref_sr = torchaudio.load(entry["ref_path"])
+                        if ref_wav.shape[0] > 1:
+                            ref_wav = ref_wav.mean(dim=0, keepdim=True)
+                        ref_tuple = (ref_wav, ref_sr)
+                        wav, sr = generate_omnivoice(model, entry["text_target"], ref_tuple)
                         save_wav(wav, sr, syn_path)
                         all_outputs[model_name][entry["idx"]] = syn_path
                     except Exception as e:
