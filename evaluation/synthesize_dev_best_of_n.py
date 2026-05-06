@@ -200,7 +200,10 @@ def main():
     parser = argparse.ArgumentParser(description="Best-of-N Synthesis for OmniVoice Fine-tuning")
     parser.add_argument("--lang", required=True, choices=["fr", "ar", "zh"])
     parser.add_argument("--dataset", default="ymoslem/acl-6060")
-    parser.add_argument("--split", default="dev")
+    parser.add_argument("--splits", nargs="+", default=["dev"],
+                        help="Dataset splits to use, e.g. --splits dev eval")
+    parser.add_argument("--split", default=None,
+                        help="(Deprecated) Use --splits instead. Kept for backwards compat.")
     parser.add_argument("--output-dir", default="./dev_synth")
     parser.add_argument("--cache-dir", default="./data_cache")
     parser.add_argument("--max-samples", type=int, default=None)
@@ -213,27 +216,44 @@ def main():
     elif os.environ.get("HF_TOKEN"):
         login(token=os.environ["HF_TOKEN"])
 
+    # Resolve splits: --split (deprecated) takes precedence if explicitly given
+    if args.split is not None:
+        splits = [args.split]
+    else:
+        splits = args.splits
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     lang = args.lang
     models_to_run = MODELS_PER_LANG[lang]
 
+    splits_label = "+".join(splits)
     print("=" * 64)
-    print(f"  BEST-OF-N SYNTHESIS ({lang})")
+    print(f"  BEST-OF-N SYNTHESIS ({lang}) — splits: {splits_label}")
     print(f"  Models: {', '.join(models_to_run)}")
     print("=" * 64)
 
     # ---------------------------------------------------------------
-    # Phase 1: Extract dataset
+    # Phase 1: Extract dataset (supports multiple splits)
     # ---------------------------------------------------------------
-    print(f"\n📥 Phase 1: Extracting dev set")
-    ds = load_dataset(args.dataset, split=args.split, cache_dir=args.cache_dir)
+    print(f"\n📥 Phase 1: Extracting {splits_label} set(s)")
+    from datasets import concatenate_datasets
+    ds_parts = []
+    for sp in splits:
+        part = load_dataset(args.dataset, split=sp, cache_dir=args.cache_dir)
+        print(f"   Loaded split '{sp}': {len(part)} samples")
+        ds_parts.append(part)
+    if len(ds_parts) > 1:
+        ds = concatenate_datasets(ds_parts)
+    else:
+        ds = ds_parts[0]
+    del ds_parts
     total = len(ds)
     if args.max_samples and args.max_samples < total:
         step = max(1, total // args.max_samples)
         indices = list(range(0, total, step))[:args.max_samples]
         ds = ds.select(indices)
     total = len(ds)
-    print(f"   Samples: {total}")
+    print(f"   Total samples (combined): {total}")
 
     ref_dir = os.path.join(args.output_dir, "ref_audio")
     os.makedirs(ref_dir, exist_ok=True)
