@@ -167,21 +167,38 @@ def main():
     # ---------------------------------------------------------------
     # Create README
     # ---------------------------------------------------------------
-    # Count per-language stats
-    lang_counts = {}
-    for row in all_rows:
-        lang_counts[row["language"]] = lang_counts.get(row["language"], 0) + 1
-
-    # Count best model distribution
-    model_counts = {}
-    for row in all_rows:
-        m = row.get("best_model", "unknown")
-        model_counts[m] = model_counts.get(m, 0) + 1
-
-    model_table = "\n".join(
-        f"| {m} | {c} | {100*c/len(all_rows):.1f}% |"
-        for m, c in sorted(model_counts.items(), key=lambda x: -x[1])
-    )
+    # ---------------------------------------------------------------
+    # Create Detailed Results Tables per Language
+    # ---------------------------------------------------------------
+    detailed_stats = ""
+    for lang in ["fr", "ar", "zh"]:
+        summary_path = synth_dir / f"summary_{lang}.json"
+        if summary_path.exists():
+            try:
+                with open(summary_path, "r") as f:
+                    data = json.load(f)
+                
+                detailed_stats += f"### {lang.upper()} Results\n\n"
+                detailed_stats += "| Model | Rows Won | % | Avg CER | Avg Sim | Avg Score |\n"
+                detailed_stats += "|---|---|---|---|---|---|\n"
+                
+                # Sort models by Avg Score
+                results = data.get("results", [])
+                results.sort(key=lambda x: x.get("avg_score", 0), reverse=True)
+                
+                for r in results:
+                    detailed_stats += (
+                        f"| {r['model']} | {r['rows_won']} | {r['pct_won']:.1f}% | "
+                        f"{r['avg_cer']:.4f} | {r['avg_sim']:.4f} | {r['avg_score']:.4f} |\n"
+                    )
+                
+                best_n = data.get("best_of_n", {})
+                detailed_stats += (
+                    f"| **BEST-OF-N** | **{best_n.get('total', 0)}** | **100%** | "
+                    f"— | — | **{best_n.get('avg_score', 0):.4f}** |\n\n"
+                )
+            except Exception as e:
+                print(f"  ⚠ Could not parse {summary_path}: {e}")
 
     readme = f"""---
 license: apache-2.0
@@ -212,7 +229,7 @@ to listen to both the **reference audio** (original speaker) and the **best synt
 
 ## Dataset Description
 
-For each sentence in the dev split of `ymoslem/acl-6060` (468 samples × 3 languages),
+For each sentence in the dev split of `ymoslem/acl-6060` (884 samples × 3 languages),
 we synthesized audio with the **top voice cloning models** per language and selected
 the best output based on: **Combined = 0.5 × (1 - CER) + 0.5 × Speaker_Similarity**
 
@@ -227,17 +244,9 @@ the best output based on: **Combined = 0.5 × (1 - CER) + 0.5 × Speaker_Similar
 | `best_model` | Which model won for this sample |
 | `best_score` | Combined quality score (0-1, higher=better) |
 
-### Samples per language
+### Detailed Results by Language
 
-| Language | Samples |
-|---|---|
-{chr(10).join(f"| {l} | {c} |" for l, c in sorted(lang_counts.items()))}
-
-### Model selection distribution
-
-| Model | Wins | % |
-|---|---|---|
-{model_table}
+{detailed_stats}
 
 ### Total samples: {len(all_rows)}
 
