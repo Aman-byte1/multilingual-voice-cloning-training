@@ -40,6 +40,14 @@ import torch
 def _patch_infer_schema():
     """Patch torch.library.infer_schema to handle string type annotations."""
     try:
+        # Patch for VoxCPM: scaled_dot_product_attention compatibility
+        import torch.nn.functional as F
+        orig_sdpa = F.scaled_dot_product_attention
+        def patched_sdpa(*args, **kwargs):
+            kwargs.pop('enable_gqa', None)
+            return orig_sdpa(*args, **kwargs)
+        F.scaled_dot_product_attention = patched_sdpa
+
         import torch._library.infer_schema as _is
         _orig_infer = _is.infer_schema
 
