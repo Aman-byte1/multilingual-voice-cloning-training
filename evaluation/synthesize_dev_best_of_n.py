@@ -38,75 +38,96 @@ os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
 import torch
 
 def _patch_infer_schema():
-    """Patch torch.library.infer_schema to handle string type annotations."""
+    """Patch torch.library.infer_schema and SDPA for model compatibility."""
     try:
-        # Patch for VoxCPM: scaled_dot_product_attention compatibility
+        import torch
         import torch.nn.functional as F
+        import typing
+        import inspect
+
+        # 1. Global SDPA Patch for VoxCPM
         orig_sdpa = F.scaled_dot_product_attention
         def patched_sdpa(*args, **kwargs):
+            # VoxCPM sometimes passes enable_gqa which is not in some torch versions
             kwargs.pop('enable_gqa', None)
             return orig_sdpa(*args, **kwargs)
         F.scaled_dot_product_attention = patched_sdpa
+        # Also patch it in the torch namespace just in case
+        torch.nn.functional.scaled_dot_product_attention = patched_sdpa
 
+        # 2. infer_schema Patch for OmniVoice (PyTorch 2.6+ compatibility)
         import torch._library.infer_schema as _is
         _orig_infer = _is.infer_schema
 
         def _fix_annotations(fn):
             """Resolve string type annotations on a function in-place."""
-            import inspect, typing
+            if not callable(fn):
+                return fn
+            
+            # Common torch types that might be string-annotated
             type_map = {
                 'torch.Tensor': torch.Tensor,
                 'Tensor': torch.Tensor,
                 'torch.dtype': torch.dtype,
                 'torch.device': torch.device,
+                'Optional[torch.Tensor]': typing.Optional[torch.Tensor],
+                'Optional[Tensor]': typing.Optional[torch.Tensor],
+                'List[torch.Tensor]': typing.List[torch.Tensor],
+                'List[Tensor]': typing.List[torch.Tensor],
             }
-            for name, typ in list(type_map.items()):
-                type_map[f'Optional[{name}]'] = typing.Optional[typ]
 
-            if not callable(fn):
-                return fn
-
-            # Fix __annotations__ dict directly
+            # Fix __annotations__ dict
             annots = getattr(fn, '__annotations__', {})
             changed = False
             for k, v in list(annots.items()):
                 if isinstance(v, str) and v in type_map:
                     annots[k] = type_map[v]
                     changed = True
+                elif isinstance(v, str) and 'torch.Tensor' in v:
+                    # Catch nested or slightly different strings
+                    annots[k] = torch.Tensor
+                    changed = True
 
             if changed:
                 fn.__annotations__ = annots
-                # Also rebuild __signature__ if it exists
+                # Force-rebuild signature
                 try:
                     sig = inspect.signature(fn)
                     new_params = []
-                    for p in sig.parameters.values():
-                        if isinstance(p.annotation, str) and p.annotation in type_map:
-                            p = p.replace(annotation=type_map[p.annotation])
-                        new_params.append(p)
+                    for name, param in sig.parameters.items():
+                        annot = param.annotation
+                        if isinstance(annot, str) and annot in type_map:
+                            param = param.replace(annotation=type_map[annot])
+                        elif isinstance(annot, str) and 'torch.Tensor' in annot:
+                            param = param.replace(annotation=torch.Tensor)
+                        new_params.append(param)
+                    
                     ret = sig.return_annotation
                     if isinstance(ret, str) and ret in type_map:
                         ret = type_map[ret]
+                    elif isinstance(ret, str) and 'torch.Tensor' in ret:
+                        ret = torch.Tensor
+                        
                     fn.__signature__ = sig.replace(parameters=new_params, return_annotation=ret)
-                except (ValueError, TypeError):
+                except Exception:
                     pass
             return fn
 
         def _patched_infer_schema(*args, **kwargs):
             """Resolve string annotations before passing to original."""
-            # The first positional arg is the prototype function
             if args and callable(args[0]):
-                args = (_fix_annotations(args[0]),) + args[1:]
+                # Patch the prototype function
+                new_fn = _fix_annotations(args[0])
+                args = (new_fn,) + args[1:]
             return _orig_infer(*args, **kwargs)
 
         _is.infer_schema = _patched_infer_schema
-
-        # Also patch the public API entry point
         if hasattr(torch.library, 'infer_schema'):
             torch.library.infer_schema = _patched_infer_schema
 
     except Exception:
         pass
+
 
 
 _patch_infer_schema()
