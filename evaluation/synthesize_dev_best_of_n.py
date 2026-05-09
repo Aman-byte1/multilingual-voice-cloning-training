@@ -47,10 +47,20 @@ def _patch_infer_schema():
 
         # 1. Global SDPA Patch for VoxCPM
         orig_sdpa = F.scaled_dot_product_attention
-        def patched_sdpa(*args, **kwargs):
-            # VoxCPM sometimes passes enable_gqa which is not in some torch versions
+        def patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+            # VoxCPM Fix: Handle GQA mismatch (e.g. Q=16 heads, K/V=2 heads)
+            # Tensor shapes are usually (batch, heads, seq_len, head_dim)
+            if query.ndim == 4 and key.ndim == 4:
+                q_heads = query.shape[1]
+                k_heads = key.shape[1]
+                if q_heads != k_heads and q_heads % k_heads == 0:
+                    # Broadcast K and V heads to match Q heads
+                    repeat_factor = q_heads // k_heads
+                    key = key.repeat_interleave(repeat_factor, dim=1)
+                    value = value.repeat_interleave(repeat_factor, dim=1)
+            
             kwargs.pop('enable_gqa', None)
-            return orig_sdpa(*args, **kwargs)
+            return orig_sdpa(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, **kwargs)
         F.scaled_dot_product_attention = patched_sdpa
         # Also patch it in the torch namespace just in case
         torch.nn.functional.scaled_dot_product_attention = patched_sdpa
