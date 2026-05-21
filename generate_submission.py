@@ -56,9 +56,9 @@ from peft import PeftModel
 
 # Final Winning Checkpoints
 BEST_MODELS = {
-    "zh": "amanuelbyte/omnivoice-lora-zh-400",
-    "ar": "amanuelbyte/omnivoice-lora-ar-400",
-    "fr": "amanuelbyte/omnivoice-lora-fr-200",
+    "zh": "amanuelbyte/omnivoice_finetuned_zh",
+    "ar": "amanuelbyte/omnivoice_finetuned_ar",
+    "fr": "amanuelbyte/omnivoice_finetuned_fr",
 }
 
 # Fallback names if -400 doesn't exist for all
