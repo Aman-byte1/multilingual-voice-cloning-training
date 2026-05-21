@@ -67,6 +67,28 @@ _install_flex_stub()
 from omnivoice import OmniVoice
 
 
+# ── Safe CUDA cleanup ──────────────────────────────────────────────────────
+
+def _safe_cuda_cleanup():
+    """Clean up GPU memory, tolerating deferred device-side asserts."""
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass  # async CUDA error — already printed by driver
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        # If empty_cache fails, the CUDA context is corrupted.
+        # Reset the device so subsequent models can still use the GPU.
+        try:
+            device_idx = torch.cuda.current_device()
+            torch.cuda.device(device_idx)
+            torch.cuda.empty_cache()
+        except Exception:
+            print("  ⚠ CUDA context unrecoverable — scoring will use CPU if needed")
+    gc.collect()
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def load_dev_samples(lang: str, n: int = 30):
@@ -266,8 +288,7 @@ def evaluate_language(lang: str, n_samples: int, device: str):
     )
 
     del base_model
-    torch.cuda.empty_cache()
-    gc.collect()
+    _safe_cuda_cleanup()
 
     # ── 2. Fine-tuned model ──────────────────────────────────────
     print(f"\n  🟢 Loading FINE-TUNED OmniVoice from {merged_dir}…")
@@ -279,22 +300,35 @@ def evaluate_language(lang: str, n_samples: int, device: str):
     )
 
     del ft_model
-    torch.cuda.empty_cache()
-    gc.collect()
+    _safe_cuda_cleanup()
 
     # ── 3. Load scoring models ───────────────────────────────────
     print(f"\n  📊 Loading Whisper + ECAPA-TDNN for scoring…")
     from faster_whisper import WhisperModel
     from speechbrain.inference.speaker import SpeakerRecognition
 
-    whisper = WhisperModel(
-        "large-v3", device=device,
-        compute_type="float16" if device == "cuda" else "int8"
-    )
+    # Try GPU first; fall back to CPU if CUDA context was corrupted
+    score_device = device
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        print("  ⚠ CUDA context corrupted after synthesis — scoring will use CPU")
+        score_device = "cpu"
+
+    try:
+        whisper = WhisperModel(
+            "large-v3", device=score_device,
+            compute_type="float16" if score_device == "cuda" else "int8"
+        )
+    except Exception:
+        print("  ⚠ Whisper failed on GPU — falling back to CPU")
+        score_device = "cpu"
+        whisper = WhisperModel("large-v3", device="cpu", compute_type="int8")
+
     verifier = SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
-        run_opts={"device": device},
+        run_opts={"device": score_device},
     )
 
     # ── 4. Score ─────────────────────────────────────────────────
@@ -305,8 +339,7 @@ def evaluate_language(lang: str, n_samples: int, device: str):
     ft_cer, ft_wer, ft_sim = score_results(ft_results, whisper, verifier, lang, device)
 
     del whisper, verifier
-    torch.cuda.empty_cache()
-    gc.collect()
+    _safe_cuda_cleanup()
 
     # ── 5. Report ────────────────────────────────────────────────
     def pct_change(old, new, lower_is_better=True):
