@@ -262,6 +262,70 @@ def fix_merged_model_configs(lang: str):
                     shutil.copytree(src, dst)
                 else:
                     shutil.copy2(src, dst)
+        
+        # ── Weight key prefix and missing key repair ─────────────
+        import torch
+        ckpt_file = None
+        for name in ["pytorch_model.bin", "model.safetensors"]:
+            candidate = merged_dir / name
+            if candidate.exists():
+                ckpt_file = candidate
+                break
+        
+        if ckpt_file:
+            print(f"  🔧 Checking weight keys in {ckpt_file.name}...")
+            use_safetensors = ckpt_file.name.endswith(".safetensors")
+            if use_safetensors:
+                from safetensors.torch import load_file, save_file
+                state_dict = load_file(str(ckpt_file))
+            else:
+                state_dict = torch.load(str(ckpt_file), map_location="cpu", weights_only=True)
+            
+            OMNIVOICE_SPECIFIC_KEYS = {"audio_embeddings.weight", "audio_heads.weight", "codebook_layer_offsets"}
+            LLM_KEY_PATTERNS = ["layers.", "embed_tokens.", "norm.", "lm_head."]
+            
+            needs_prefix = lambda k: not k.startswith("llm.") and any(k.startswith(p) for p in LLM_KEY_PATTERNS)
+            bare_llm_keys = [k for k in state_dict if needs_prefix(k)]
+            missing_omni = [k for k in OMNIVOICE_SPECIFIC_KEYS if k not in state_dict]
+            
+            if bare_llm_keys or missing_omni:
+                print(f"  🔧 Repairing {len(bare_llm_keys)} keys & restoring {len(missing_omni)} missing OmniVoice weights...")
+                
+                base_ckpt = base_path / ("model.safetensors" if (base_path / "model.safetensors").exists() else "pytorch_model.bin")
+                if base_ckpt.name.endswith(".safetensors"):
+                    base_state_dict = load_file(str(base_ckpt))
+                else:
+                    base_state_dict = torch.load(str(base_ckpt), map_location="cpu", weights_only=True)
+                
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    if needs_prefix(k):
+                        new_state_dict[f"llm.{k}"] = v
+                    else:
+                        new_state_dict[k] = v
+                
+                for key in missing_omni:
+                    if key in base_state_dict:
+                        new_state_dict[key] = base_state_dict[key]
+                
+                # Backup original
+                backup = ckpt_file.with_suffix(ckpt_file.suffix + ".bak")
+                if not backup.exists():
+                    shutil.copy2(str(ckpt_file), str(backup))
+                
+                from safetensors.torch import save_file
+                save_file(new_state_dict, str(merged_dir / "model.safetensors"))
+                torch.save(new_state_dict, str(merged_dir / "pytorch_model.bin"))
+                print(f"  ✅ Weights successfully repaired!")
+            else:
+                # If no repair was needed, but model.safetensors is missing, create it
+                safetensors_path = merged_dir / "model.safetensors"
+                if not safetensors_path.exists():
+                    print(f"  🔧 Creating missing {safetensors_path.name} from {ckpt_file.name}...")
+                    from safetensors.torch import save_file
+                    save_file(state_dict, str(safetensors_path))
+                    print(f"  ✅ model.safetensors successfully created!")
+
         print(f"  ✅ Configuration files and tokenizer successfully repaired for {lang.upper()}!")
     except Exception as e:
         print(f"  ⚠ Failed to repair configs for {lang.upper()}: {e}")
