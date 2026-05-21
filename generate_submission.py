@@ -260,21 +260,75 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--text-dir", default="./blind_test/text")
     parser.add_argument("--audio-dir", default="./blind_test/audio")
-    parser.add_argument("--output-dir", default="./submission_outputs")
+    parser.add_argument("--output-dir", default="./temp_submission")
     parser.add_argument("--ref-duration", type=float, default=10.0,
                         help="Reference audio duration in seconds (OmniVoice recommends 3-10s)")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
+    parser.add_argument("--parallel", action="store_true",
+                        help="Run generation in parallel across available GPUs (if --lang all)")
+    parser.add_argument("--gpus", default="0,1,2",
+                        help="Comma-separated list of GPU IDs to distribute processes over (default: 0,1,2)")
     args = parser.parse_args()
 
     langs = ["zh", "ar", "fr"] if args.lang == "all" else [args.lang]
-    for l in langs:
-        full_name = {'zh': 'chinese', 'ar': 'arabic', 'fr': 'french'}[l]
-        t_cands = [Path(args.text_dir)/f"{l}.txt", Path(args.text_dir)/f"{full_name}.txt"]
-        r_cands = [Path(args.audio_dir)/l, Path(args.audio_dir)/full_name, Path(args.audio_dir)]
+
+    if args.lang == "all" and args.parallel and len(langs) > 1:
+        gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip()]
+        if not gpu_list:
+            gpu_list = ["0"]
         
-        tf = next((c for c in t_cands if c.exists()), None)
-        rd = next((c for c in r_cands if c.exists() and any(c.glob("*.wav"))), None)
-        if tf and rd: generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, ref_duration=args.ref_duration)
+        import subprocess
+        processes = []
+        log_files = []
+        
+        print(f"🚀 Starting parallel generation for {langs} on GPUs {gpu_list}...")
+        
+        for idx, lang in enumerate(langs):
+            gpu_id = gpu_list[idx % len(gpu_list)]
+            
+            # Restrict visibility inside the child process using CUDA_VISIBLE_DEVICES
+            child_cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--lang", lang,
+                "--text-dir", args.text_dir,
+                "--audio-dir", args.audio_dir,
+                "--output-dir", args.output_dir,
+                "--ref-duration", str(args.ref_duration),
+                "--device", "cuda"
+            ]
+            if args.token:
+                child_cmd.extend(["--token", args.token])
+            
+            log_path = f"logs/generate_{lang}.log"
+            os.makedirs("logs", exist_ok=True)
+            log_file = open(log_path, "w", encoding="utf-8")
+            log_files.append((lang, log_path, log_file))
+            
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = gpu_id
+            
+            print(f"  ➜ [{lang.upper()}] starting on GPU {gpu_id} (log: {log_path})")
+            p = subprocess.Popen(child_cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+            processes.append((lang, p))
+            
+        print("\n⏳ Waiting for generation to complete...")
+        for lang, p in processes:
+            p.wait()
+            
+        for _, _, f in log_files:
+            f.close()
+            
+        print("\n✅ Parallel generation processes finished!")
+    else:
+        for l in langs:
+            full_name = {'zh': 'chinese', 'ar': 'arabic', 'fr': 'french'}[l]
+            t_cands = [Path(args.text_dir)/f"{l}.txt", Path(args.text_dir)/f"{full_name}.txt"]
+            r_cands = [Path(args.audio_dir)/l, Path(args.audio_dir)/full_name, Path(args.audio_dir)]
+            
+            tf = next((c for c in t_cands if c.exists()), None)
+            rd = next((c for c in r_cands if c.exists() and any(c.glob("*.wav"))), None)
+            if tf and rd: generate_submission(l, BEST_MODELS[l], tf, rd, args.output_dir, args.device, args.token, ref_duration=args.ref_duration)
 
 if __name__ == "__main__":
     main()
