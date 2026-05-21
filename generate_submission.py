@@ -18,19 +18,40 @@ from functools import partial
 # ── OmniVoice compatibility patch ──────────────────────────────
 # Must happen BEFORE importing omnivoice
 
-# Step 1: Stub the missing module so import doesn't crash
 def _install_flex_stub():
     mod_name = "torch.nn.attention.flex_attention"
-    if mod_name in sys.modules:
-        return
-    try:
-        import torch.nn.attention as attn_mod
-        stub = types.ModuleType(mod_name)
-        stub.create_block_mask = lambda *a, **kw: None
-        sys.modules[mod_name] = stub
-        setattr(attn_mod, "flex_attention", stub)
-    except Exception:
-        pass
+    import sys
+    import types
+    import torch
+    
+    # 1. Try to import the existing module or create a stub if it doesn't exist
+    if mod_name in sys.modules and sys.modules[mod_name] is not None:
+        flex_mod = sys.modules[mod_name]
+    else:
+        try:
+            import torch.nn.attention.flex_attention as flex_mod
+        except ImportError:
+            flex_mod = types.ModuleType(mod_name)
+            sys.modules[mod_name] = flex_mod
+            try:
+                import torch.nn.attention as attn_mod
+                setattr(attn_mod, "flex_attention", flex_mod)
+            except Exception:
+                pass
+
+    # 2. Guarantee that critical objects needed by transformers/omnivoice exist
+    if not hasattr(flex_mod, "_DEFAULT_SPARSE_BLOCK_SIZE"):
+        setattr(flex_mod, "_DEFAULT_SPARSE_BLOCK_SIZE", 128)
+        
+    if not hasattr(flex_mod, "create_block_mask"):
+        def create_block_mask(mask_mod, B=None, H=None, Q_LEN=None, KV_LEN=None,
+                              _compile=False, device=None, **kw):
+            seq_len = int(Q_LEN or KV_LEN or 1)
+            causal = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
+            mask = torch.zeros((1, 1, seq_len, seq_len), device=device, dtype=torch.float32)
+            mask.masked_fill_(~causal.unsqueeze(0).unsqueeze(0), torch.finfo(mask.dtype).min)
+            return mask
+        setattr(flex_mod, "create_block_mask", create_block_mask)
 
 # Step 2: Patch source file WITHOUT importing omnivoice (find via site-packages)
 def _patch_omnivoice_source():
