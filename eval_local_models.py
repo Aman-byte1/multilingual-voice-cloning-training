@@ -29,11 +29,30 @@ from functools import partial
 # ── Install flex_attention stub BEFORE importing omnivoice ──────────────────
 def _install_flex_stub():
     mod_name = "torch.nn.attention.flex_attention"
-    if mod_name in sys.modules:
-        return
-    try:
-        import torch.nn.attention as attn_mod
-        stub = types.ModuleType(mod_name)
+    import sys
+    import types
+    import torch
+    
+    # 1. Try to import the existing module or create a stub if it doesn't exist
+    if mod_name in sys.modules and sys.modules[mod_name] is not None:
+        flex_mod = sys.modules[mod_name]
+    else:
+        try:
+            import torch.nn.attention.flex_attention as flex_mod
+        except ImportError:
+            flex_mod = types.ModuleType(mod_name)
+            sys.modules[mod_name] = flex_mod
+            try:
+                import torch.nn.attention as attn_mod
+                setattr(attn_mod, "flex_attention", flex_mod)
+            except Exception:
+                pass
+
+    # 2. Guarantee that critical objects needed by transformers/omnivoice exist
+    if not hasattr(flex_mod, "_DEFAULT_SPARSE_BLOCK_SIZE"):
+        setattr(flex_mod, "_DEFAULT_SPARSE_BLOCK_SIZE", 128)
+        
+    if not hasattr(flex_mod, "create_block_mask"):
         def create_block_mask(mask_mod, B=None, H=None, Q_LEN=None, KV_LEN=None,
                               _compile=False, device=None, **kw):
             seq_len = int(Q_LEN or KV_LEN or 1)
@@ -41,11 +60,7 @@ def _install_flex_stub():
             mask = torch.zeros((1, 1, seq_len, seq_len), device=device, dtype=torch.float32)
             mask.masked_fill_(~causal.unsqueeze(0).unsqueeze(0), torch.finfo(mask.dtype).min)
             return mask
-        stub.create_block_mask = create_block_mask
-        sys.modules[mod_name] = stub
-        setattr(attn_mod, "flex_attention", stub)
-    except Exception:
-        pass
+        setattr(flex_mod, "create_block_mask", create_block_mask)
 
 _install_flex_stub()
 
@@ -302,11 +317,100 @@ def main():
     parser.add_argument("--n-samples", type=int, default=30,
                         help="Number of dev samples to evaluate per language (default: 30)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Run evaluations in parallel across available GPUs (if --lang all)")
+    parser.add_argument("--gpus", default="0,1,2",
+                        help="Comma-separated list of GPU IDs to distribute processes over (default: 0,1,2)")
     args = parser.parse_args()
 
     langs = ["fr", "ar", "zh"] if args.lang == "all" else [args.lang]
-    for lang in langs:
-        evaluate_language(lang, args.n_samples, args.device)
+
+    if args.lang == "all" and args.parallel and len(langs) > 1:
+        gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip()]
+        if not gpu_list:
+            gpu_list = ["0"]
+        
+        import subprocess
+        processes = []
+        log_files = []
+        
+        print(f"🚀 Starting parallel evaluation for {langs} on GPUs {gpu_list}...")
+        
+        for idx, lang in enumerate(langs):
+            gpu_id = gpu_list[idx % len(gpu_list)]
+            
+            # Restrict visibility inside the child process using CUDA_VISIBLE_DEVICES
+            child_cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--lang", lang,
+                "--n-samples", str(args.n_samples),
+                "--device", "cuda"
+            ]
+            
+            log_path = f"logs/eval_{lang}.log"
+            os.makedirs("logs", exist_ok=True)
+            log_file = open(log_path, "w", encoding="utf-8")
+            log_files.append((lang, log_path, log_file))
+            
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = gpu_id
+            
+            print(f"  ➜ [{lang.upper()}] starting on GPU {gpu_id} (log: {log_path})")
+            p = subprocess.Popen(child_cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+            processes.append((lang, p))
+            
+        print("\n⏳ Waiting for evaluations to complete...")
+        for lang, p in processes:
+            p.wait()
+            
+        for _, _, f in log_files:
+            f.close()
+            
+        print("\n✅ Parallel evaluation processes finished!")
+        print("📊 Summaries:")
+        
+        for lang, log_path, _ in log_files:
+            report_path = f"eval_report_{lang}.json"
+            if os.path.exists(report_path):
+                with open(report_path) as f:
+                    report = json.load(f)
+                base = report["base"]
+                ft = report["finetuned"]
+                
+                def pct_change(old, new, lower_is_better=True):
+                    if old == 0:
+                        return "N/A"
+                    if lower_is_better:
+                        return f"{((old - new) / old) * 100:+.1f}%"
+                    else:
+                        return f"{((new - old) / old) * 100:+.1f}%"
+                
+                W = 68
+                FULL = {"zh": "CHINESE", "ar": "ARABIC", "fr": "FRENCH"}[lang]
+                n = report["n_samples"]
+                print(f"\n{'='*W}")
+                print(f"🏆  {FULL} ({lang.upper()}) — {n} samples")
+                print(f"{'='*W}")
+                print(f"{'Metric':<14}| {'Base OmniVoice':<16}| {'Fine-Tuned LoRA':<16}| Δ")
+                print(f"{'-'*W}")
+                print(f"{'CER  (↓)':<14}| {base['cer']:<16.4f}| {ft['cer']:<16.4f}| {pct_change(base['cer'], ft['cer'], True)}")
+                print(f"{'WER  (↓)':<14}| {base['wer']:<16.4f}| {ft['wer']:<16.4f}| {pct_change(base['wer'], ft['wer'], True)}")
+                print(f"{'SIM  (↑)':<14}| {base['sim']:<16.4f}| {ft['sim']:<16.4f}| {pct_change(base['sim'], ft['sim'], False)}")
+                print(f"{'='*W}")
+            else:
+                print(f"\n❌ Could not find report for {lang.upper()}. Check {log_path} for errors.")
+                try:
+                    with open(log_path, "r", encoding="utf-8") as lf:
+                        lines = lf.readlines()[-15:]
+                        print(f"--- Last 15 lines of {log_path} ---")
+                        for line in lines:
+                            print(f"  {line.rstrip()}")
+                except Exception:
+                    pass
+    else:
+        for lang in langs:
+            evaluate_language(lang, args.n_samples, args.device)
 
 
 if __name__ == "__main__":
