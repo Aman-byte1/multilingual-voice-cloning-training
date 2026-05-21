@@ -81,9 +81,12 @@ def patch_model(omnivoice_dir: str) -> bool:
         and "# PATCHED: flex_attention compatibility fallback" not in content
     ):
         replacement = """try:
-    from torch.nn.attention.flex_attention import create_block_mask
-except ModuleNotFoundError:
+    from torch.nn.attention.flex_attention import create_block_mask  # noqa
+except (ModuleNotFoundError, ImportError):
     # PATCHED: flex_attention compatibility fallback
+    import torch as _torch
+    from functools import partial as _partial
+
     def create_block_mask(
         mask_mod,
         B=None,
@@ -95,17 +98,21 @@ except ModuleNotFoundError:
         **kwargs,
     ):
         _seq_len = int(Q_LEN or KV_LEN or 1)
-        _causal = torch.tril(torch.ones(
+        if isinstance(mask_mod, _partial) and mask_mod.args:
+            _doc = mask_mod.args[0]
+            if _torch.is_tensor(_doc):
+                _seq_len = int(_doc.numel())
+        _causal = _torch.tril(_torch.ones(
             _seq_len, _seq_len,
-            device=device, dtype=torch.bool,
+            device=device, dtype=_torch.bool,
         ))
-        _mask = torch.zeros(
+        _mask = _torch.zeros(
             (1, 1, _seq_len, _seq_len),
-            device=device, dtype=torch.float32,
+            device=device, dtype=_torch.float32,
         )
         _mask.masked_fill_(
             ~_causal.unsqueeze(0).unsqueeze(0),
-            torch.finfo(_mask.dtype).min,
+            _torch.finfo(_mask.dtype).min,
         )
         return _mask"""
         content = content.replace(import_line, replacement)
