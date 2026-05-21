@@ -404,9 +404,8 @@ def main():
         # Apply LoRA
         logger.info("🧬 Applying LoRA adapters...")
         lora_config = get_lora_config(args)
-        model.llm = model.llm.to(torch.float32)
+        model = model.to(torch.bfloat16)
         model.llm = get_peft_model(model.llm, lora_config)
-        model.llm = model.llm.to(torch.float32)
         
         # Freeze embeddings if requested
         if args.freeze_embeddings:

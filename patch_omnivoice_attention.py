@@ -19,7 +19,7 @@ import sys
 
 
 def patch_builder(omnivoice_dir: str) -> bool:
-    """Patch builder.py: eager attention + gradient checkpointing."""
+    """Patch builder.py: eager/sdpa attention + gradient checkpointing."""
     path = os.path.join(omnivoice_dir, "omnivoice", "training", "builder.py")
     if not os.path.exists(path):
         print(f"  ⚠ {path} not found, skipping")
@@ -30,22 +30,57 @@ def patch_builder(omnivoice_dir: str) -> bool:
 
     changed = False
 
-    # 1. flex_attention → eager
-    if "flex_attention" in content:
-        content = content.replace(
-            'attn_implementation="flex_attention"',
-            'attn_implementation="eager"',
-        )
-        print(f"  ✅ flex_attention → eager")
-        changed = True
+    # Function to robustly insert a line at the start of a function
+    def insert_at_function_start(file_content, func_name, code_to_insert):
+        start_idx = file_content.find(f"def {func_name}")
+        if start_idx == -1:
+            return file_content, False
+        colon_idx = file_content.find(":", start_idx)
+        if colon_idx == -1:
+            return file_content, False
+        
+        pos = colon_idx + 1
+        while pos < len(file_content) and file_content[pos] in " \t\r\n":
+            pos += 1
+            
+        line_start = pos
+        while line_start > 0 and file_content[line_start - 1] not in "\r\n":
+            line_start -= 1
+        indent = file_content[line_start:pos]
+        
+        patched_line = f"{indent}{code_to_insert}\n"
+        new_content = file_content[:pos] + patched_line + file_content[pos:]
+        return new_content, True
 
-    # 2. Enable gradient checkpointing
+    # 1. Force config.attn_implementation = "sdpa" inside build_model_and_tokenizer
+    if 'config.attn_implementation = "sdpa"' not in content:
+        content, ok = insert_at_function_start(
+            content, 
+            "build_model_and_tokenizer", 
+            'config.attn_implementation = "sdpa"'
+        )
+        if ok:
+            print("  ✅ Forced attn_implementation = 'sdpa' in build_model_and_tokenizer")
+            changed = True
+
+    # 2. Force config.attn_implementation = "sdpa" inside build_dataloaders
+    if 'config.attn_implementation = "sdpa"' not in content:
+        content, ok = insert_at_function_start(
+            content, 
+            "build_dataloaders", 
+            'config.attn_implementation = "sdpa"'
+        )
+        if ok:
+            print("  ✅ Forced attn_implementation = 'sdpa' in build_dataloaders")
+            changed = True
+
+    # 3. Enable gradient checkpointing
     if "gradient_checkpointing_enable" not in content:
         content = content.replace(
             "return model, tokenizer",
             (
                 "# Enable gradient checkpointing to reduce activation memory\n"
-                "    # (critical for eager attention which stores O(n^2) attn weights per layer)\n"
+                "    # (critical for eager/sdpa attention which stores O(n^2) attn weights per layer)\n"
                 "    model.llm.gradient_checkpointing_enable()\n"
                 "\n"
                 "    return model, tokenizer"

@@ -160,6 +160,7 @@ def main():
     train_loader, eval_loader = build_dataloaders(config, tokenizer)
 
     lora_cfg = get_lora_config(args, model)
+    model = model.to(torch.bfloat16)
     model.llm = get_peft_model(model.llm, lora_cfg)
 
     if args.freeze_embeddings:
