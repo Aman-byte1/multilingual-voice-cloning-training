@@ -64,7 +64,14 @@ def patch_builder(omnivoice_dir: str) -> bool:
 
 
 def patch_model(omnivoice_dir: str) -> bool:
-    """Patch omnivoice.py: BlockMask → standard 4D causal mask."""
+    """Patch omnivoice.py: replace flex_attention forward path with dense causal mask.
+
+    The upstream OmniVoice code already wraps the flex_attention import in
+    try/except and sets ``_flex_attention_available``.  When flex_attention is
+    NOT available the ``forward()`` method raises ``RuntimeError``.  This patch
+    replaces that RuntimeError path with a working dense causal mask so training
+    works with ``attn_implementation="eager"`` (or ``"sdpa"``).
+    """
     path = os.path.join(omnivoice_dir, "omnivoice", "models", "omnivoice.py")
     if not os.path.exists(path):
         print(f"  ⚠ {path} not found, skipping")
@@ -75,55 +82,23 @@ def patch_model(omnivoice_dir: str) -> bool:
 
     changed = False
 
-    import_line = "from torch.nn.attention.flex_attention import create_block_mask"
-    if (
-        import_line in content
-        and "# PATCHED: flex_attention compatibility fallback" not in content
-    ):
-        replacement = """try:
-    from torch.nn.attention.flex_attention import create_block_mask  # noqa
-except (ModuleNotFoundError, ImportError):
-    # PATCHED: flex_attention compatibility fallback
-    import torch as _torch
-    from functools import partial as _partial
+    # ── Patch 1: Replace the forward() flex_attention block ────────────
+    # The upstream forward() has this pattern:
+    #   if attention_mask is None and document_ids is not None:
+    #       if not _flex_attention_available:
+    #           raise RuntimeError(...)
+    #       attention_mask = create_block_mask(...)
+    #
+    # We replace the ENTIRE if-block with a dense causal mask that always works.
 
-    def create_block_mask(
-        mask_mod,
-        B=None,
-        H=None,
-        Q_LEN=None,
-        KV_LEN=None,
-        _compile=False,
-        device=None,
-        **kwargs,
-    ):
-        _seq_len = int(Q_LEN or KV_LEN or 1)
-        if isinstance(mask_mod, _partial) and mask_mod.args:
-            _doc = mask_mod.args[0]
-            if _torch.is_tensor(_doc):
-                _seq_len = int(_doc.numel())
-        _causal = _torch.tril(_torch.ones(
-            _seq_len, _seq_len,
-            device=device, dtype=_torch.bool,
-        ))
-        _mask = _torch.zeros(
-            (1, 1, _seq_len, _seq_len),
-            device=device, dtype=_torch.float32,
-        )
-        _mask.masked_fill_(
-            ~_causal.unsqueeze(0).unsqueeze(0),
-            _torch.finfo(_mask.dtype).min,
-        )
-        return _mask"""
-        content = content.replace(import_line, replacement)
-        print(f"  ✅ Added flex_attention import fallback")
-        changed = True
-    elif "# PATCHED: flex_attention compatibility fallback" in content:
-        print(f"  ✓ flex_attention fallback already patched")
-    else:
-        print(f"  ⚠ Could not find flex_attention import pattern")
-
-    old = """        if attention_mask is None and document_ids is not None:
+    old_forward_block = """\
+        if attention_mask is None and document_ids is not None:
+            if not _flex_attention_available:
+                raise RuntimeError(
+                    "flex_attention is not available in the current environment. "
+                    "If you do not need flex_attention, set "
+                    '"attn_implementation": "sdpa" in your training config.'
+                )
             attention_mask = create_block_mask(
                 _get_packed_mask(
                     document_ids[0].to(inputs_embeds.device),
@@ -136,16 +111,18 @@ except (ModuleNotFoundError, ImportError):
                 device=inputs_embeds.device,
             )"""
 
-    new = """        if attention_mask is None and document_ids is not None:
-            # PATCHED: standard causal mask (replaces BlockMask for eager attn)
+    new_forward_block = """\
+        if attention_mask is None and document_ids is not None:
+            # PATCHED: dense causal mask (replaces flex_attention / BlockMask)
             _seq_len = input_ids.size(-1)
             _doc_ids = document_ids[0].to(inputs_embeds.device)
             _same_doc = _doc_ids.unsqueeze(0) == _doc_ids.unsqueeze(1)
+            _valid_tok = _doc_ids >= 0
             _causal = torch.tril(torch.ones(
                 _seq_len, _seq_len,
                 device=inputs_embeds.device, dtype=torch.bool,
             ))
-            _valid = _same_doc & _causal
+            _valid = _same_doc & _valid_tok.unsqueeze(0) & _valid_tok.unsqueeze(1) & _causal
             _mask_dtype = inputs_embeds.dtype
             attention_mask = torch.zeros(
                 _seq_len, _seq_len,
@@ -154,20 +131,21 @@ except (ModuleNotFoundError, ImportError):
             attention_mask.masked_fill_(~_valid, torch.finfo(_mask_dtype).min)
             attention_mask = attention_mask.unsqueeze(0).unsqueeze(0)"""
 
-    if "# PATCHED: standard causal mask" in content:
-        print(f"  ✓ omnivoice.py causal mask already patched")
-    elif old in content:
-        content = content.replace(old, new)
-        print(f"  ✅ BlockMask → standard 4D causal mask")
+    if "# PATCHED: dense causal mask" in content:
+        print("  ✓ forward() causal mask already patched")
+    elif old_forward_block in content:
+        content = content.replace(old_forward_block, new_forward_block)
+        print("  ✅ forward() → dense causal mask (replaces flex_attention)")
         changed = True
     else:
-        print(f"  ⚠ Could not find BlockMask pattern — may already be patched")
+        print("  ⚠ Could not find forward() flex_attention block — may already be patched")
 
     if changed:
         with open(path, "w") as f:
             f.write(content)
 
     return True
+
 
 
 def main():
