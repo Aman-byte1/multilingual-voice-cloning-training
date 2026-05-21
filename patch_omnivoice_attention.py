@@ -30,47 +30,28 @@ def patch_builder(omnivoice_dir: str) -> bool:
 
     changed = False
 
-    # Function to robustly insert a line at the start of a function
-    def insert_at_function_start(file_content, func_name, code_to_insert):
-        start_idx = file_content.find(f"def {func_name}")
-        if start_idx == -1:
-            return file_content, False
-        colon_idx = file_content.find(":", start_idx)
-        if colon_idx == -1:
-            return file_content, False
-        
-        pos = colon_idx + 1
-        while pos < len(file_content) and file_content[pos] in " \t\r\n":
-            pos += 1
-            
-        line_start = pos
-        while line_start > 0 and file_content[line_start - 1] not in "\r\n":
-            line_start -= 1
-        indent = file_content[line_start:pos]
-        
-        patched_line = f"{indent}{code_to_insert}\n"
-        new_content = file_content[:pos] + patched_line + file_content[pos:]
-        return new_content, True
+    # Clean up any corruption from previous bad patches (e.g. `config: config.attn...`)
+    import re
+    cleaned_content = re.sub(r'(config:\s*TrainingConfig,?)(\s*config\.attn_implementation = "sdpa"\s*)+', r'\1', content)
+    cleaned_content = re.sub(r'config:\s*config:\s*config\.attn_implementation = "sdpa"', 'config: TrainingConfig,', cleaned_content)
+    if cleaned_content != content:
+        content = cleaned_content
+        print("  🧹 Cleaned up corrupted builder.py signatures")
+        changed = True
 
     # 1. Force config.attn_implementation = "sdpa" inside build_model_and_tokenizer
-    if 'config.attn_implementation = "sdpa"' not in content:
-        content, ok = insert_at_function_start(
-            content, 
-            "build_model_and_tokenizer", 
-            'config.attn_implementation = "sdpa"'
-        )
-        if ok:
+    target1 = 'logger.info("Initializing Model & Tokenizer...")'
+    if 'config.attn_implementation = "sdpa"' not in content.split('def build_model_and_tokenizer')[1].split('def build_dataloaders')[0]:
+        if target1 in content:
+            content = content.replace(target1, 'config.attn_implementation = "sdpa"\n    ' + target1)
             print("  ✅ Forced attn_implementation = 'sdpa' in build_model_and_tokenizer")
             changed = True
 
     # 2. Force config.attn_implementation = "sdpa" inside build_dataloaders
-    if 'config.attn_implementation = "sdpa"' not in content:
-        content, ok = insert_at_function_start(
-            content, 
-            "build_dataloaders", 
-            'config.attn_implementation = "sdpa"'
-        )
-        if ok:
+    target2 = 'logger.info("Initializing Data Readers...")'
+    if 'config.attn_implementation = "sdpa"' not in content.split('def build_dataloaders')[-1]:
+        if target2 in content:
+            content = content.replace(target2, 'config.attn_implementation = "sdpa"\n    ' + target2)
             print("  ✅ Forced attn_implementation = 'sdpa' in build_dataloaders")
             changed = True
 
@@ -197,6 +178,13 @@ def main():
     print("=" * 60)
     print("  Patching OmniVoice for eager attention")
     print("=" * 60)
+
+    # Clean / Restore the submodule first to get rid of any corruption
+    if os.path.exists(os.path.join(args.omnivoice_dir, ".git")):
+        print("  🧹 Restoring OmniVoice repository to clean state...")
+        import subprocess
+        subprocess.run(["git", "-C", args.omnivoice_dir, "restore", "."])
+        subprocess.run(["git", "-C", args.omnivoice_dir, "clean", "-fd"])
 
     ok1 = patch_builder(args.omnivoice_dir)
     ok2 = patch_model(args.omnivoice_dir)
