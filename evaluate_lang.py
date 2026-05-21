@@ -53,13 +53,22 @@ LANG_CONFIG = {
 }
 
 # ── helpers ─────────────────────────────────────────────────────
-def extract_speaker_embedding(path, verifier, device="cuda"):
+def extract_speaker_embedding(path, verifier, device="cpu"):
+    """Return ECAPA-TDNN speaker embedding for an audio file. Runs on CPU to prevent CUDA asserts."""
     try:
         wav, sr = torchaudio.load(path)
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
+        if wav.shape[0] > 1:
+            wav = wav.mean(0, keepdim=True)
+            
+        # Pad short audio to at least 1 second to avoid conv/pool errors in ECAPA
+        if wav.shape[1] < 16000:
+            pad_len = 16000 - wav.shape[1]
+            wav = torch.nn.functional.pad(wav, (0, pad_len))
+            
         with torch.no_grad():
-            emb = verifier.encode_batch(wav.to(device)).squeeze(0).squeeze(0)
+            emb = verifier.encode_batch(wav.cpu()).squeeze(0).squeeze(0)
         return emb
     except Exception:
         return None
@@ -160,7 +169,7 @@ def main():
     verifier = SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
-        run_opts={"device": device},
+        run_opts={"device": "cpu"},
     )
 
     # Pre-cache ref embeddings
