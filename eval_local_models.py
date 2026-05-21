@@ -132,16 +132,23 @@ def safe_tensor(audio_data) -> torch.Tensor:
     return t.cpu().float()
 
 
-def extract_speaker_embedding(path: str, verifier, device: str):
-    """Return ECAPA-TDNN speaker embedding for an audio file."""
+def extract_speaker_embedding(path: str, verifier, device: str = "cpu"):
+    """Return ECAPA-TDNN speaker embedding for an audio file. Runs on CPU to prevent CUDA asserts."""
     try:
         wav, sr = torchaudio.load(path)
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
         if wav.shape[0] > 1:
             wav = wav.mean(0, keepdim=True)
+            
+        # Pad short audio to at least 1 second to avoid conv/pool errors in ECAPA
+        if wav.shape[1] < 16000:
+            pad_len = 16000 - wav.shape[1]
+            wav = torch.nn.functional.pad(wav, (0, pad_len))
+            
         with torch.no_grad():
-            emb = verifier.encode_batch(wav.to(device)).squeeze(0).squeeze(0)
+            # Force CPU for ECAPA to avoid corrupting GPU context on bad audio
+            emb = verifier.encode_batch(wav.cpu()).squeeze(0).squeeze(0)
         return emb
     except Exception as e:
         print(f"  ⚠ Speaker embedding failed for {path}: {e}")
@@ -193,8 +200,8 @@ def score_results(results, whisper, verifier, lang: str, device: str):
     cers, wers, sims = [], [], []
     for s in tqdm(results, desc="  Score"):
         # Speaker similarity
-        ref_emb = extract_speaker_embedding(s["ref_path"], verifier, device)
-        syn_emb = extract_speaker_embedding(s["path"],     verifier, device)
+        ref_emb = extract_speaker_embedding(s["ref_path"], verifier, "cpu")
+        syn_emb = extract_speaker_embedding(s["path"],     verifier, "cpu")
         if ref_emb is not None and syn_emb is not None:
             sim = float(F.cosine_similarity(ref_emb.unsqueeze(0), syn_emb.unsqueeze(0)).item())
         else:
@@ -325,10 +332,11 @@ def evaluate_language(lang: str, n_samples: int, device: str):
         score_device = "cpu"
         whisper = WhisperModel("large-v3", device="cpu", compute_type="int8")
 
+    # Force ECAPA-TDNN to CPU. It's fast enough on CPU and avoids fragile CUDA asserts with short/silent audio.
     verifier = SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
-        run_opts={"device": score_device},
+        run_opts={"device": "cpu"},
     )
 
     # ── 4. Score ─────────────────────────────────────────────────
