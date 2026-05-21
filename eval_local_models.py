@@ -198,11 +198,54 @@ def score_results(results, whisper, verifier, lang: str, device: str):
     )
 
 
+def fix_merged_model_configs(lang: str):
+    import shutil
+    merged_dir = Path(f"./exp/omnivoice_finetuned_{lang}/merged_model")
+    if not merged_dir.exists():
+        return
+    
+    print(f"  🔧 Checking & repairing configuration files in {merged_dir}...")
+    try:
+        from huggingface_hub import snapshot_download
+        base_path = Path(snapshot_download("k2-fsa/OmniVoice"))
+        
+        # Files/directories to copy from base model to merged model
+        items_to_copy = [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.txt",
+            "vocab.json",
+            "merges.txt",
+            "added_tokens.json",
+            "audio_tokenizer"
+        ]
+        
+        for item in items_to_copy:
+            src = base_path / item
+            dst = merged_dir / item
+            if src.exists():
+                if src.is_dir():
+                    if dst.exists():
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+        print(f"  ✅ Configuration files and tokenizer successfully repaired for {lang.upper()}!")
+    except Exception as e:
+        print(f"  ⚠ Failed to repair configs for {lang.upper()}: {e}")
+
+
 def evaluate_language(lang: str, n_samples: int, device: str):
     merged_dir = Path(f"./exp/omnivoice_finetuned_{lang}/merged_model")
     if not merged_dir.exists():
         print(f"❌ Merged model not found at {merged_dir}. Did training finish?")
         return
+
+    # Automatically fix and restore original configurations/tokenizer settings
+    fix_merged_model_configs(lang)
 
     print(f"\n{'='*65}")
     print(f"  🌍 Evaluating language: {lang.upper()}")
