@@ -199,7 +199,10 @@ def main():
         ref_embs[spk] = extract_speaker_embedding(ref_path, verifier, device)
 
     # 5. Score
-    transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
+    if LANG in ("zh", "ar"):
+        transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip()])
+    else:
+        transforms = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemoveMultipleSpaces(), jiwer.Strip(), jiwer.RemovePunctuation()])
 
     def score_set(file_list, label):
         results = []
@@ -211,8 +214,11 @@ def main():
             sim = (float(F.cosine_similarity(emb.unsqueeze(0), ref_emb.unsqueeze(0)).item())
                    if emb is not None and ref_emb is not None else 0.0)
             try:
-                segs, _ = whisper.transcribe(path, language=LANG)
-                hyp = "".join([seg.text for seg in segs])
+                segs, _ = whisper.transcribe(path, language=LANG, beam_size=5, vad_filter=True)
+                if LANG == "zh":
+                    hyp = "".join([seg.text for seg in segs])
+                else:
+                    hyp = " ".join([seg.text for seg in segs]).strip()
                 ref_text = text_lines[s["idx"]]
                 cer = jiwer.cer(transforms(ref_text), transforms(hyp))
                 wer = jiwer.wer(transforms(ref_text), transforms(hyp))
