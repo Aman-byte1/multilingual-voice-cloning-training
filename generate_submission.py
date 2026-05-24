@@ -84,6 +84,7 @@ BEST_MODELS = {
 
 # Fallback names if -400 doesn't exist for all
 FALLBACK_MODELS = {
+    "zh": "amanuelbyte/omnivoice-lora-zh-400",
     "ar": "amanuelbyte/omnivoice-lora-ar",
     "fr": "amanuelbyte/omnivoice-lora-fr",
 }
