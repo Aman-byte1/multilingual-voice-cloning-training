@@ -101,6 +101,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--lang", required=True, choices=["zh", "ar", "fr"])
     parser.add_argument("--n-segments", type=int, default=25)
+    parser.add_argument("--lora-only", action="store_true", help="Evaluate LoRA generated samples only (skip base model generation/evaluation)")
     args = parser.parse_args()
 
     LANG       = args.lang
@@ -139,37 +140,42 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 3. Generate BASE OmniVoice counterparts
-    print(f"\n🚀 Loading BASE OmniVoice…")
-    from omnivoice import OmniVoice
-    base_model = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
-    base_model.to(device).eval()
-
     base_dir = f"eval_base_{LANG}_samples"
     os.makedirs(base_dir, exist_ok=True)
     base_map = {}
-
-    print("🎙️  Generating base-model audio…")
-    for spk in tqdm(speakers, desc="Speakers"):
-        ref_path = os.path.join(OUT_DIR, f"_extracted_reference_{spk}.wav")
-        if not os.path.exists(ref_path):
-            ref_path = f"blind_test/audio/{spk}.wav"
-        wav, sr_in = torchaudio.load(ref_path)
-        ref_tuple = (wav, sr_in)
-
+    for spk in speakers:
         for i in range(N_SEG):
-            out_path = os.path.join(base_dir, f"base_{i}_{spk}.wav")
-            base_map[(spk, i)] = out_path
-            if os.path.exists(out_path):
-                continue
-            with torch.no_grad():
-                res = base_model.generate(text=text_lines[i], ref_audio=ref_tuple,
-                                          temperature=0.8, top_p=0.9)
-                audio_data = res[0] if isinstance(res, tuple) else res
-                torchaudio.save(out_path, safe_tensor(audio_data), 24000)
+            base_map[(spk, i)] = os.path.join(base_dir, f"base_{i}_{spk}.wav")
 
-    del base_model
-    torch.cuda.empty_cache()
-    gc.collect()
+    if not args.lora_only:
+        print(f"\n🚀 Loading BASE OmniVoice…")
+        from omnivoice import OmniVoice
+        base_model = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
+        base_model.to(device).eval()
+
+        print("🎙️  Generating base-model audio…")
+        for spk in tqdm(speakers, desc="Speakers"):
+            ref_path = os.path.join(OUT_DIR, f"_extracted_reference_{spk}.wav")
+            if not os.path.exists(ref_path):
+                ref_path = f"blind_test/audio/{spk}.wav"
+            wav, sr_in = torchaudio.load(ref_path)
+            ref_tuple = (wav, sr_in)
+
+            for i in range(N_SEG):
+                out_path = base_map[(spk, i)]
+                if os.path.exists(out_path):
+                    continue
+                with torch.no_grad():
+                    res = base_model.generate(text=text_lines[i], ref_audio=ref_tuple,
+                                              temperature=0.8, top_p=0.9)
+                    audio_data = res[0] if isinstance(res, tuple) else res
+                    torchaudio.save(out_path, safe_tensor(audio_data), 24000)
+
+        del base_model
+        torch.cuda.empty_cache()
+        gc.collect()
+    else:
+        print("\n⏭ Skipping BASE OmniVoice generation (--lora-only flag active).")
 
     # 4. Load eval models
     print("\n🔎 Loading Whisper-large-v3 + ECAPA-TDNN…")
@@ -218,14 +224,25 @@ def main():
         return avg("cer"), avg("wer"), avg("sim")
 
     lora_list = [{"path": os.path.join(OUT_DIR, s["file"]), "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
-    base_list = [{"path": base_map[(s["speaker"], s["idx"])], "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
-
     lora_cer, lora_wer, lora_sim = score_set(lora_list, f"LoRA {LORA_LABEL}")
-    base_cer, base_wer, base_sim = score_set(base_list, "Base")
+
+    # Check if we can/should score base
+    should_score_base = True
+    if args.lora_only:
+        all_base_exist = all(os.path.exists(base_map[(s["speaker"], s["idx"])]) for s in eval_samples)
+        if not all_base_exist:
+            should_score_base = False
+            print("\n⏭ Skipping BASE OmniVoice scoring (some or all base audio files are missing).")
+
+    if should_score_base:
+        base_list = [{"path": base_map[(s["speaker"], s["idx"])], "speaker": s["speaker"], "idx": s["idx"]} for s in eval_samples]
+        base_cer, base_wer, base_sim = score_set(base_list, "Base")
+    else:
+        base_cer, base_wer, base_sim = None, None, None
 
     # 6. Report
     def pct(b, n, lower=True):
-        if b == 0: return "+0.0%"
+        if b is None or b == 0: return "+0.0%"
         d = ((b - n) / b) * 100 if lower else ((n - b) / b) * 100
         return f"{d:+.1f}%"
 
@@ -234,24 +251,35 @@ def main():
     print("\n" + "=" * W)
     print(f"🏆  {FULL} ({LANG.upper()}) A/B TEST — {len(eval_samples)} samples")
     print("=" * W)
-    print(f"{'Metric':<16}| {'Base OmniVoice':<16}| {'LoRA ' + LORA_LABEL:<16}| {'Δ Improvement'}")
-    print("-" * W)
-    print(f"{'CER  (↓)':<16}| {base_cer:<16.4f}| {lora_cer:<16.4f}| {pct(base_cer, lora_cer)}")
-    print(f"{'WER  (↓)':<16}| {base_wer:<16.4f}| {lora_wer:<16.4f}| {pct(base_wer, lora_wer)}")
-    print(f"{'SIM  (↑)':<16}| {base_sim:<16.4f}| {lora_sim:<16.4f}| {pct(base_sim, lora_sim, False)}")
-    print("=" * W)
+    
+    if base_cer is not None:
+        print(f"{'Metric':<16}| {'Base OmniVoice':<16}| {'LoRA ' + LORA_LABEL:<16}| {'Δ Improvement'}")
+        print("-" * W)
+        print(f"{'CER  (↓)':<16}| {base_cer:<16.4f}| {lora_cer:<16.4f}| {pct(base_cer, lora_cer)}")
+        print(f"{'WER  (↓)':<16}| {base_wer:<16.4f}| {lora_wer:<16.4f}| {pct(base_wer, lora_wer)}")
+        print(f"{'SIM  (↑)':<16}| {base_sim:<16.4f}| {lora_sim:<16.4f}| {pct(base_sim, lora_sim, False)}")
+        print("=" * W)
 
-    wins = sum([lora_cer < base_cer, lora_wer < base_wer, lora_sim > base_sim])
-    if wins == 3:   print("\n✅ CLEAR UPGRADE — LoRA wins all 3 metrics.")
-    elif wins >= 2: print("\n✅ UPGRADE — LoRA wins 2/3 metrics.")
-    else:           print("\n⚠️  MIXED — trade-offs detected.")
+        wins = sum([lora_cer < base_cer, lora_wer < base_wer, lora_sim > base_sim])
+        if wins == 3:   print("\n✅ CLEAR UPGRADE — LoRA wins all 3 metrics.")
+        elif wins >= 2: print("\n✅ UPGRADE — LoRA wins 2/3 metrics.")
+        else:           print("\n⚠️  MIXED — trade-offs detected.")
+    else:
+        print(f"{'Metric':<16}| {'LoRA ' + LORA_LABEL:<16}")
+        print("-" * W)
+        print(f"{'CER  (↓)':<16}| {lora_cer:<16.4f}")
+        print(f"{'WER  (↓)':<16}| {lora_wer:<16.4f}")
+        print(f"{'SIM  (↑)':<16}| {lora_sim:<16.4f}")
+        print("=" * W)
 
     report = {
         "language": LANG,
         "n_samples": len(eval_samples),
-        "base": {"cer": base_cer, "wer": base_wer, "sim": base_sim},
         "lora": {"cer": lora_cer, "wer": lora_wer, "sim": lora_sim},
     }
+    if base_cer is not None:
+        report["base"] = {"cer": base_cer, "wer": base_wer, "sim": base_sim}
+
     with open(REPORT, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\n📄 Saved → {REPORT}")

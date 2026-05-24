@@ -37,7 +37,7 @@ echo "============================================================"
 for lang in fr ar zh; do
     if [ -d "temp_submission/$lang" ]; then
         echo "🚀 Evaluating $lang..."
-        python evaluate_lang.py --lang "$lang"
+        python evaluate_lang.py --lang "$lang" "$@"
     else
         echo "⏭ Skipping $lang (no generated audio)"
     fi
