@@ -162,13 +162,27 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
         # 1. Load the Base Model
         model = OmniVoice.from_pretrained("k2-fsa/OmniVoice", token=token)
         
-        # 2. Download LoRA Weights
+        # 2. Download LoRA/Merged Weights with robust fallback
         print(f"  📥 Downloading weights from {model_name}...")
-        weights_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", token=token)
-        sd = load_file(weights_path)
+        sd = None
+        for filename in ["model.safetensors", "pytorch_model.bin", "adapter_model.safetensors", "adapter_model.bin"]:
+            try:
+                print(f"    Trying to download {filename}...")
+                weights_path = hf_hub_download(repo_id=model_name, filename=filename, token=token)
+                if filename.endswith(".safetensors"):
+                    sd = load_file(weights_path)
+                else:
+                    sd = torch.load(weights_path, map_location="cpu", weights_only=True)
+                print(f"    ✅ Successfully downloaded and loaded {filename}")
+                break
+            except Exception as e:
+                print(f"    ✕ {filename} not found or failed to load: {e}")
         
+        if sd is None:
+            raise FileNotFoundError(f"Could not find any valid weight file (model.safetensors, pytorch_model.bin, adapter_model.safetensors, adapter_model.bin) in {model_name}")
+
         # 3. Manual Merge Logic
-        print("  🧩 Merging LoRA weights manually...")
+        print("  🧩 Merging/Loading weights...")
         merged_sd = {}
         processed_bases = set()
         
@@ -197,7 +211,7 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                     processed_bases.add(la_key)
                     processed_bases.add(lb_key)
             
-        # Carry over non-lora weights (norm, embed, etc.)
+        # Carry over non-lora weights (norm, embed, etc. or already merged weights)
         for k in sd.keys():
             if k not in processed_bases:
                 clean_key = k.replace("llm.base_model.model.", "llm.")
@@ -205,7 +219,7 @@ def generate_submission(lang, model_name, text_file, ref_dir, out_root, device="
                 
         # 4. Load into model
         model.load_state_dict(merged_sd, strict=False)
-        print("  ✅ Smart Merge successful.")
+        print("  ✅ Weight loading / Smart Merge successful.")
         
     except Exception as e:
         print(f"  ❌ Smart Merge failed: {e}")
