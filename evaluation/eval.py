@@ -141,6 +141,9 @@ def main():
     parser.add_argument("--skip-lora", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip generation if audio already exists")
     parser.add_argument("--hf-token", default=None, help="Hugging Face API token for authentication")
+    parser.add_argument("--start-idx", type=int, default=None, help="Start sample index (for parallel runs)")
+    parser.add_argument("--end-idx", type=int, default=None, help="End sample index exclusive (for parallel runs)")
+    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile optimization")
     args = parser.parse_args()
 
     if args.hf_token:
@@ -200,6 +203,13 @@ def main():
     gc.collect()
     print(f"   Extracted {len(manifest)} samples. Dataset freed from RAM.")
 
+    # Apply sample range partitioning (for parallel runs)
+    if args.start_idx is not None or args.end_idx is not None:
+        s_idx = args.start_idx or 0
+        e_idx = args.end_idx or len(manifest)
+        manifest = manifest[s_idx:e_idx]
+        print(f"   ⚡ Partition: samples [{s_idx}:{e_idx}] → {len(manifest)} samples")
+
     # PHASE 2: Load Chatterbox (dataset is gone, RAM is free)
     print(f"\n🔧 Phase 2: Loading Chatterbox model")
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
@@ -231,6 +241,15 @@ def main():
     model.t3.eval()
     model_sr = model.sr
 
+    # Optimize with torch.compile for faster autoregressive generation
+    if not args.no_compile:
+        try:
+            print("   ⚡ Compiling model with torch.compile (first sample will be slower)...")
+            model.t3 = torch.compile(model.t3, mode="reduce-overhead")
+            print("   ⚡ torch.compile applied ✓")
+        except Exception as e:
+            print(f"   ⚠ torch.compile failed (non-fatal): {e}")
+
     # PHASE 3: Generate (using pre-extracted manifest, not dataset)
     print(f"\n🎙  Phase 3: Generating {len(manifest)} samples")
     samples = []
@@ -260,7 +279,7 @@ def main():
 
         try:
             t0 = time.perf_counter()
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 wav = model.generate(
                     text_target,
                     audio_prompt_path=ref_path,
