@@ -86,10 +86,12 @@ def save_temp_wav(audio_array: np.ndarray, sr: int, prefix: str = "eval", output
 
 def load_speaker_model(device="cuda"):
     from speechbrain.inference.speaker import SpeakerRecognition
+    # Map 'cuda' to 'cuda:0' to prevent SpeechBrain device string parsing warnings/errors
+    sb_device = "cuda:0" if device == "cuda" else device
     return SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
-        run_opts={"device": device}
+        run_opts={"device": sb_device}
     )
 
 def extract_speaker_embedding(wav_path, model, device="cuda"):
@@ -98,10 +100,18 @@ def extract_speaker_embedding(wav_path, model, device="cuda"):
         wav, sr = torchaudio.load(wav_path)
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
-        wav = wav.squeeze(0).to(device)  # mono
-        emb = model.encode_batch(wav.unsqueeze(0))
+        
+        # Ensure mono by taking the mean across channels if multi-channel
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+            
+        wav = wav.to(device)
+        emb = model.encode_batch(wav)
         return emb.squeeze(0).squeeze(0).detach()
-    except Exception:
+    except Exception as e:
+        print(f"   ⚠ Failed to extract speaker embedding for {wav_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def safe_mean(vals):

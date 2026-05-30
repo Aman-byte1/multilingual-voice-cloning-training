@@ -26,9 +26,57 @@ def safe_count(vals):
     return len([x for x in vals if x is not None and not np.isnan(x)])
 
 
+def load_speaker_model(device="cuda"):
+    from speechbrain.inference.speaker import SpeakerRecognition
+    # Map 'cuda' to 'cuda:0' to prevent SpeechBrain device string parsing warnings/errors
+    sb_device = "cuda:0" if device == "cuda" else device
+    return SpeakerRecognition.from_hparams(
+        source="speechbrain/spkrec-ecapa-voxceleb",
+        savedir=os.path.expanduser("~/.cache/speechbrain_spkrec"),
+        run_opts={"device": sb_device}
+    )
+
+def extract_speaker_embedding_from_wav(wav_path, model, device="cuda"):
+    import torchaudio
+    import torch
+    try:
+        wav, sr = torchaudio.load(wav_path)
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.to(device)
+        emb = model.encode_batch(wav)
+        return emb.squeeze(0).squeeze(0).detach()
+    except Exception as e:
+        print(f"   ⚠ Failed to extract embedding from wav {wav_path}: {e}")
+        return None
+
+def extract_speaker_embedding_from_array(audio_array, sr, model, device="cuda"):
+    import torch
+    import torchaudio
+    try:
+        wav = torch.from_numpy(audio_array).float()
+        if wav.dim() == 1:
+            wav = wav.unsqueeze(0)
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.to(device)
+        emb = model.encode_batch(wav)
+        return emb.squeeze(0).squeeze(0).detach()
+    except Exception as e:
+        print(f"   ⚠ Failed to extract embedding from array: {e}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Aggregate parallel eval results")
     parser.add_argument("--output-dir", required=True, help="Directory with partition results")
+    parser.add_argument("--dataset", default="ymoslem/acl-6060", help="Hugging Face dataset name")
+    parser.add_argument("--split", default="eval", help="Dataset split")
+    parser.add_argument("--cache-dir", default="./data_cache", help="Dataset cache dir")
     args = parser.parse_args()
 
     # Find all partition CSVs
@@ -68,6 +116,59 @@ def main():
     # Sort by idx
     all_results.sort(key=lambda r: r.get("idx", 0))
     print(f"\nTotal samples: {len(all_results)}")
+
+    # Check if we have missing/nan similarity scores
+    missing_sim_indices = [r["idx"] for r in all_results if r["Similarity"] is None or np.isnan(r["Similarity"])]
+    
+    if missing_sim_indices:
+        print(f"\n🔍 Found {len(missing_sim_indices)} samples with missing/nan Speaker Similarity.")
+        print("🧠 Re-calculating Speaker Similarity using Hugging Face references...")
+        
+        import torch
+        import torch.nn.functional as F
+        from datasets import load_dataset
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"   Loading SpeechBrain verifier on {device}...")
+        spk_model = load_speaker_model(device=device)
+        
+        print("   Loading Hugging Face dataset...")
+        ds_test = load_dataset(args.dataset, split=args.split, cache_dir=args.cache_dir)
+        
+        # Build map from idx to result dictionary
+        result_map = {r["idx"]: r for r in all_results}
+        
+        # We need to map target language to correctly extract references if needed
+        # Defaults to 'fr' / 'zh' based on eval split structure
+        target_lang = "zh"
+        
+        for idx in tqdm(missing_sim_indices, desc="Re-calculating Similarity"):
+            row_data = ds_test[idx]
+            ref_data = row_data.get("ref_en_voice") or row_data.get(f"ref_{target_lang}_voice") or row_data.get("audio_en") or row_data.get("audio")
+            
+            syn_path = os.path.join(args.output_dir, f"synth_{idx:05d}.wav")
+            
+            if ref_data and os.path.exists(syn_path):
+                # Extract embeddings
+                ref_emb = extract_speaker_embedding_from_array(
+                    np.asarray(ref_data["array"], dtype=np.float32),
+                    ref_data["sampling_rate"],
+                    spk_model,
+                    device
+                )
+                syn_emb = extract_speaker_embedding_from_wav(
+                    syn_path,
+                    spk_model,
+                    device
+                )
+                
+                if ref_emb is not None and syn_emb is not None:
+                    sim = float(F.cosine_similarity(ref_emb.unsqueeze(0), syn_emb.unsqueeze(0)).item())
+                    result_map[idx]["Similarity"] = sim
+                else:
+                    result_map[idx]["Similarity"] = None
+            else:
+                result_map[idx]["Similarity"] = None
 
     # Compute aggregated metrics
     metric_keys = ["WER", "CER", "Similarity", "InferenceS", "RTF"]
