@@ -407,20 +407,21 @@ def main():
         print(f"  {k:<16} {m:>9.4f} {f'±{s:.4f}' if not np.isnan(s) else '':>9}  {v:>3}/{len(results)}")
     print("=" * 62)
 
-    # Save summary
-    with open(os.path.join(args.output_dir, "eval_summary.json"), "w") as f:
+    # Save summary (partition-aware naming for parallel runs)
+    part_suffix = f"_{args.start_idx}_{args.end_idx}" if args.start_idx is not None else ""
+    with open(os.path.join(args.output_dir, f"eval_summary{part_suffix}.json"), "w") as f:
         json.dump(overall, f, indent=2)
 
     # Save per-sample CSV for analysis
-    csv_path = os.path.join(args.output_dir, "eval_per_sample.csv")
+    csv_path = os.path.join(args.output_dir, f"eval_per_sample{part_suffix}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["idx", "WER", "CER", "Similarity", "InferenceS", "AudioDurS", "RTF", "reference", "transcript"])
         writer.writeheader()
         writer.writerows(results)
     print(f"\n  Per-sample results saved to {csv_path}")
 
-    # Final cleanup
-    if os.path.exists(temp_ref_dir):
+    # Final cleanup (skip in parallel mode — other workers may still need temp_ref)
+    if args.start_idx is None and os.path.exists(temp_ref_dir):
         import shutil
         shutil.rmtree(temp_ref_dir)
 
